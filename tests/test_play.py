@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from roboskylar.arms import arm_contract
 from roboskylar.generate import CODEX_CATALOG, codex_catalog_flags
 from roboskylar.hosts.common import RpentBackend
 from roboskylar.play import (
@@ -16,6 +17,28 @@ from roboskylar.play import (
     _make_backend,
     _usage_from_rollouts,
 )
+
+
+def test_arm_contracts_include_planning_motion_and_image_context_rules():
+    for arm in ("cells", "program"):
+        contract = arm_contract(
+            arm,
+            budget_s=60,
+            max_env_steps=100,
+            max_programs=None,
+            images="on-primitive",
+        )
+        assert "## Module 1: Planning and Summary Pattern" in contract
+        assert "## Module 2: Planning Principles" in contract
+        assert "## Module 3: Motion Rules" in contract
+        assert "Plan (before the first tool call" in contract
+        assert "Summary (after every tool result)" in contract
+        assert "Plan follows planning principles: yes / no / not applicable" in contract
+        assert "from opposite sides" in contract
+        assert "both arms are home" in contract
+        assert "max_context_images" in contract
+        assert "head view and both wrist views" not in contract
+        assert "vertically downward orientation" not in contract
 
 
 def test_codex_catalog_only_for_ids_codex_looks_up_as_gpt_6_astra():

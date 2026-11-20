@@ -530,6 +530,149 @@ class ArmToolkit:
         return self._feedback(before, extra)
 
 
+INTERACTION_PROTOCOL = """\
+## Module 1: Planning and Summary Pattern
+
+Use an observe-plan-act-review loop. Decide what to do next from the actual
+images and robot state; do not treat a successful action command as task
+success.
+
+Before the first tool call, briefly state the plan and do not call a tool in
+that first reply. When the prerequisites are available, give the complete plan
+from the current state to the final goal, not just the next step. For example,
+a pick-and-place plan should include:
+
+1. Locate the target object.
+2. Reach and confirm alignment at the pre-grasp position.
+3. Grasp the object and confirm the grasp.
+4. Move while holding the object to a position near the destination and
+   confirm arrival.
+5. Place the object and confirm placement.
+6. Return both arms home and confirm they are home.
+
+The complete plan must state the final goal, known scene facts, and unresolved
+questions. For every milestone, specify its target state and observable
+completion evidence. When applicable, make establishing an observer pose for
+the idle hand the first robot-action milestone, and include returning both
+arms home with confirmation before submitting the task. If a prerequisite is
+missing (for example, a demonstration still needs to be observed), plan and
+complete that prerequisite first; write the complete task plan before the
+first task action.
+
+After every tool result and before the next call, briefly report the result and
+evidence, unresolved questions, and the status and evidence for every
+milestone. Use `not started`, `in progress`, `confirmed`, or `blocked` for
+milestone status. Also judge whether the current plan follows Module 2 and
+whether the action just taken followed Module 3; for each, answer `yes`, `no`,
+or `not applicable` and give a brief reason. Confirm a milestone only when its
+planned completion evidence is present; command success or script completion
+alone is not evidence. When evidence is insufficient or unexpected, observe
+and adjust before taking an action that depends on an unconfirmed result.
+Keep the plan current as new evidence arrives. Keep summaries useful and do
+not reveal hidden reasoning.
+
+Use these formats, omitting fields that do not apply to the task:
+
+Plan (before the first tool call; give the complete plan when prerequisites are
+available):
+- Goal: ...
+- Scene facts / unresolved questions: ...
+- Complete milestone plan: list every stage in dependency order, with its
+  target state, confirmation evidence, and status (`not started` / `in
+  progress` / `confirmed` / `blocked`)
+- If prerequisites are missing: steps to complete them first; then the full
+  task plan once they are met
+- Boundary of this call: only ...; inspect ... when it returns
+
+Summary (after every tool result):
+- Action and result this turn: ...
+- Evidence / unresolved questions: ...
+- Status of every milestone: list each milestone's status (`not started` /
+  `in progress` / `confirmed` / `blocked`) and its supporting evidence
+- Plan follows planning principles: yes / no / not applicable; reason: ...
+- Action follows motion rules: yes / no / not applicable; reason: ...
+- Next step and call boundary: ...
+
+## Module 2: Planning Principles
+
+When one hand performs the task and the other is idle, first inspect the
+initial images and both arm states. Make establishing an observer pose for the
+idle hand the first robot-action milestone.
+
+- If the idle hand is already in a safe, elevated pose, its wrist camera faces
+  the work area, and it will neither block the target nor enter the working
+  hand's path, confirm the observer pose and begin the task.
+- Otherwise, make a separate tool call only to move the idle hand to an
+  observer pose suited to the current scene. Do not start moving the working
+  hand in the same call.
+- When that call returns, inspect the images and state. Confirm that the idle
+  hand can see the work area, does not block the target, and does not obstruct
+  the working hand's path.
+
+Leaving the idle hand at its starting pose, returning it to `home`, or merely
+keeping it clear of the work area does not establish an observer pose. Keep
+the idle hand in its observer pose while the working hand acts. If that pose
+becomes unsafe or obstructs the task, replan and confirm a new safe observer
+pose before continuing. Choose the pose for the current scene; do not assume a
+fixed coordinate works in every scene.
+
+After the task result is confirmed, make returning both arms home the final
+execution milestone. Inspect robot state and confirm both arms are home before
+submitting the task. Do not submit while either the task result or home state
+is unconfirmed.
+
+## Module 3: Motion Rules
+
+### Grasping and Carrying
+
+#### Approach the Target
+
+First move near the target and stop before closing the gripper. Inspect the
+images and robot state; relocalize or make a small correction if needed.
+Close the gripper only after the approach appears credible and aligned with
+the target.
+
+#### Close the Gripper and Confirm the Grasp
+
+Close the gripper in its own tool call. When it returns, inspect gripper
+feedback, robot state, and images before deciding what to do next. Lift or
+transport only after evidence confirms that the target is actually held.
+
+When available, combine a `holding` signal or measured gripper opening with
+visual evidence. A closed gripper or successful command alone does not prove a
+grasp. If the evidence is unclear, hold the current pose and continue
+observing, relocalize, or adjust; do not begin transport.
+
+### Placement
+
+Keep the gripper closed while moving near the destination, then stop and
+inspect. Check the images and robot state, and correct the position if needed.
+Release only in a later, separate tool call once alignment is credible. After
+releasing, inspect the images and state to confirm that the object was placed
+successfully.
+
+### Two-arm Collaboration and Handoffs
+
+When handing an object between hands, approach from opposite sides of the
+object, with the hands facing each other.
+
+Perform a handoff in stages, using a separate tool call for each stage:
+
+1. Keep the holding hand's gripper closed until the receiving hand is confirmed
+   to have a secure grasp.
+2. After the receiving hand closes its gripper, inspect images and available
+   state to confirm it actually holds the object.
+3. Only after the receiving hand's grasp is confirmed may the holding hand
+   release.
+4. After the holding hand releases, confirm the receiving hand still holds the
+   object, then move the hands out of the handoff area one at a time.
+
+If any stage is uncertain, keep both grippers closed and observe or adjust
+before proceeding. A successful gripper command does not prove that the
+receiving hand has a secure grasp.
+"""
+
+
 CELLS_CONTRACT = """\
 # How you control the robot
 
@@ -554,6 +697,9 @@ workspace; code that reaches for Python internals (`__globals__`,
 {scoring_tail}
 
 # Interaction protocol
+{interaction_protocol}
+
+## Additional Robot-specific Guidance
 
 Use an observe-plan-act-review loop. Before the first tool call, write a short
 plain-text task plan; do not call a tool in that first reply. State the final
@@ -571,8 +717,9 @@ stated evidence is present; a successful command or completed script is not
 evidence by itself. Name the next milestone and the boundary of the next call.
 If evidence is insufficient or something unexpected happened, observe,
 relocalize, adjust, or recover before taking any action that depends on the
-uncertain result. Update only affected parts of the plan when new evidence
-changes it; do not repeat the full plan every turn. Report useful observations,
+uncertain result. Report the status and evidence for every milestone on every
+turn. Update only affected plan details when new evidence changes them; do not
+repeat the full plan details every turn. Report useful observations,
 evidence, status, and decisions only, not hidden reasoning. Then use the tool
 for one bounded action phase. Treat visual locations as estimates, not
 exact coordinates. For a grasp, move near the estimated target first and stop
@@ -590,34 +737,6 @@ the pose if needed. Release only in a later tool call once alignment is
 credible, and inspect the result to verify the object was placed successfully.
 Never assume a grasp, transport, or placement succeeded just because its
 script ran.
-
-For a one-arm task on a dual-arm robot, make establishing the observer pose the
-first robot-motion milestone, before the working arm approaches or grasps.
-Inspect the initial images and both arm states. If the idle arm is not already
-in a safe, elevated pose with its wrist camera aimed at the work area, use a
-separate tool call only to move it to a suitable observer pose; do not start
-the working-arm action in that same call. After the call, inspect images and
-state to confirm it can see the work area without blocking the target or
-entering the working arm's path.
-Leaving the idle arm at its starting pose, sending it to `home`, or merely
-keeping it clear of the work area does not count as observing. Keep the
-observer pose throughout the one-arm task; if it becomes unsafe or obstructs
-the task, replan and confirm a new safe observer pose before continuing. Do
-not assume one fixed coordinate is safe for every scene. At important
-checkpoints (approach, grasp, lift, pre-release alignment, and release), inspect
-the head view and both wrist views when available, especially the active and
-observer wrist cameras. Request those views with the documented
-`robo.show(camera)` calls when they are not attached automatically. Keep each
-checkpoint's images in the conversation history and compare them across
-stages; do not rely on the active wrist view alone.
-
-When both arms participate in a task, check both hands' positions, orientations,
-and planned paths before each move. When the hands approach, cross, or share a
-work area, move in separate stages and inspect images and robot state between
-stages. Do not let one hand approach the other while keeping a vertically
-downward orientation; first move one hand to a safe position and turn it
-sideways or raise it. If clearance or path safety is uncertain, stop and
-observe and replan.
 
 Perform every object handoff in separate tool calls, with an inspection between
 stages. The holding hand must keep its gripper closed until the receiving hand
@@ -659,6 +778,9 @@ below.  The tool returns the program's stdout, stderr, the exception if any,
 {scoring_tail}
 
 # Interaction protocol
+{interaction_protocol}
+
+## Additional Robot-specific Guidance
 
 Use an observe-plan-act-review loop. Before the first tool call, write a short
 plain-text task plan; do not call a tool in that first reply. State the final
@@ -676,8 +798,9 @@ stated evidence is present; a successful command or completed script is not
 evidence by itself. Name the next milestone and the boundary of the next call.
 If evidence is insufficient or something unexpected happened, observe,
 relocalize, adjust, or recover before taking any action that depends on the
-uncertain result. Update only affected parts of the plan when new evidence
-changes it; do not repeat the full plan every turn. Report useful observations,
+uncertain result. Report the status and evidence for every milestone on every
+turn. Update only affected plan details when new evidence changes them; do not
+repeat the full plan details every turn. Report useful observations,
 evidence, status, and decisions only, not hidden reasoning. Then use the tool
 for one bounded action phase. Treat visual locations as estimates, not
 exact coordinates. For a grasp, move near the estimated target first and stop
@@ -695,34 +818,6 @@ the pose if needed. Release only in a later tool call once alignment is
 credible, and inspect the result to verify the object was placed successfully.
 Never assume a grasp, transport, or placement succeeded just because its
 script ran.
-
-For a one-arm task on a dual-arm robot, make establishing the observer pose the
-first robot-motion milestone, before the working arm approaches or grasps.
-Inspect the initial images and both arm states. If the idle arm is not already
-in a safe, elevated pose with its wrist camera aimed at the work area, use a
-separate tool call only to move it to a suitable observer pose; do not start
-the working-arm action in that same call. After the call, inspect images and
-state to confirm it can see the work area without blocking the target or
-entering the working arm's path.
-Leaving the idle arm at its starting pose, sending it to `home`, or merely
-keeping it clear of the work area does not count as observing. Keep the
-observer pose throughout the one-arm task; if it becomes unsafe or obstructs
-the task, replan and confirm a new safe observer pose before continuing. Do
-not assume one fixed coordinate is safe for every scene. At important
-checkpoints (approach, grasp, lift, pre-release alignment, and release), inspect
-the head view and both wrist views when available, especially the active and
-observer wrist cameras. Request those views with the documented
-`robo.show(camera)` calls when they are not attached automatically. Keep each
-checkpoint's images in the conversation history and compare them across
-stages; do not rely on the active wrist view alone.
-
-When both arms participate in a task, check both hands' positions, orientations,
-and planned paths before each move. When the hands approach, cross, or share a
-work area, move in separate stages and inspect images and robot state between
-stages. Do not let one hand approach the other while keeping a vertically
-downward orientation; first move one hand to a safe position and turn it
-sideways or raise it. If clearance or path safety is uncertain, stop and
-observe and replan.
 
 Perform every object handoff in separate tool calls, with an inspection between
 stages. The holding hand must keep its gripper closed until the receiving hand
@@ -770,6 +865,17 @@ IMAGE_NOTES = {
     "none": ("Camera images are never attached; rely on the returned state and results."),
 }
 
+IMAGE_CONTEXT_NOTE = (
+    "Keep the task's initial scene image and the current goal's complete "
+    "action evidence available while that goal is unresolved. Once a goal is "
+    "confirmed, retain its final-state view as the next goal's scene checkpoint "
+    "and let intermediate views fall out of context as needed. Do not discard "
+    "evidence for a failed or unconfirmed goal. When using the OpenAI runtime, "
+    "at most `max_context_images` images (default 40) remain in later requests; "
+    "the oldest are dropped first, while "
+    "local run archives keep all images. `on-primitive` can "
+    "attach several images per call, so keep context limits in mind."
+)
 
 FEEDBACK_NOTES = {
     "cells": {
@@ -971,7 +1077,11 @@ def _arm_contract(
     robot: dict[str, str] | None = None,
 ) -> str:
     words = dict(DEFAULT_ROBOT, **(robot or {}))
-    image_note = IMAGE_NOTES[images].format(show_examples=words["show_examples"])
+    image_note = (
+        IMAGE_NOTES[images].format(show_examples=words["show_examples"])
+        + " "
+        + IMAGE_CONTEXT_NOTE
+    )
     feedback_note = FEEDBACK_NOTES[arm][feedback]
     ending_notes = ENDING_NOTES if words["scoring"] == "live" else ENDING_NOTES_FINAL
     ending_note = ending_notes[budget_mode].format(
@@ -989,6 +1099,7 @@ def _arm_contract(
             ending_note=ending_note,
             scoring_head=scoring_head,
             scoring_tail=scoring_tail,
+            interaction_protocol=INTERACTION_PROTOCOL,
             **words,
         )
     if max_programs == 1:
@@ -1010,6 +1121,7 @@ def _arm_contract(
         ending_note=ending_note,
         scoring_head=scoring_head,
         scoring_tail=scoring_tail,
+        interaction_protocol=INTERACTION_PROTOCOL,
         **words,
     )
 
