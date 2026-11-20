@@ -1,0 +1,21 @@
+roboskylar
+Copyright 2026 PyRUA-Lean Contributors
+
+roboskylar is derived from PyRUA-Lean
+(https://github.com/DAGroup-PKU/PyRUA-Lean), Copyright 2026 PyRUA-Lean
+Contributors, licensed under the Apache License, Version 2.0 (see LICENSE).
+The RoboDojo evaluation path (the robot API, the XPolicyLab host, the motion
+and perception primitives, and integrations/xpolicylab/roboskylar) was split
+out of that tree so it can be developed under this name. Copyright headers in
+the source files are kept.
+
+This product builds on RPent (https://github.com/RLinf/RPent),
+Copyright 2026 The RPent Authors, licensed under the Apache License, Version 2.0.
+Parts kept from that line, via PyRUA-Lean, were modified:
+  - src/roboskylar/mcp_server.py is adapted from RPent's HttpMcpServer;
+  - src/roboskylar/knowledge/*.md distil operating knowledge for a program author;
+  - the robot class mirrors the tool schemas (tool names, argument names and defaults).
+
+RPent is described in: Harness VLA: Steering Frozen VLAs into Reliable
+Manipulation Primitives via Memory-Guided Agents, arXiv:2607.08448
+(https://arxiv.org/abs/2607.08448).
