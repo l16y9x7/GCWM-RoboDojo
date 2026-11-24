@@ -23,7 +23,7 @@ runtime: openai
 model: null
 max_turns: 100
 budget_s: 5400
-images: on-primitive
+images: on-sim-step
 feedback: pure
 openai_options:
   max_tokens: 8192
