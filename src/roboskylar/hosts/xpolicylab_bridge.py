@@ -36,6 +36,7 @@ matrices, a late picture gets the matrix of the observation before as well.
 from __future__ import annotations
 
 import asyncio
+import copy
 import threading
 import time
 from typing import Any
@@ -63,6 +64,7 @@ class Bridge:
         self._over: dict[str, Any] | None = None
         self._status: dict[str, Any] = {}
         self._pictured: Any = None
+        self._frame_subscribers: set[Any] = set()
         self.resets = 0
 
     # -- the evaluation client's side (the policy server calls these) -------------------------
@@ -73,6 +75,8 @@ class Bridge:
             self._cv.notify_all()
 
     def update_obs(self, obs: dict[str, Any]) -> None:
+        callbacks: tuple[Any, ...]
+        frame_event: dict[str, Any] | None = None
         with self._cv:
             info = (obs.get("additional_info") or {}).get(STATUS_KEY)
             if isinstance(info, dict):
@@ -104,7 +108,33 @@ class Bridge:
             self._pictured = (state, poses)
             self._obs = obs
             self._serial += 1
+            callbacks = tuple(self._frame_subscribers)
+            if callbacks:
+                vision = obs.get("vision") or {}
+                images = {
+                    name: copy.deepcopy(cam["color"])
+                    for name, cam in vision.items()
+                    if isinstance(cam, dict) and cam.get("color") is not None
+                }
+                if images:
+                    frame_event = {
+                        "seq": self._serial,
+                        "step": self._status.get("step"),
+                        "images": images,
+                    }
+            if frame_event is not None:
+                for callback in callbacks:
+                    callback(frame_event)
             self._cv.notify_all()
+
+    def subscribe_frames(self, callback: Any) -> None:
+        """Receive an immutable image snapshot for each observation as it arrives."""
+        with self._cv:
+            self._frame_subscribers.add(callback)
+
+    def unsubscribe_frames(self, callback: Any) -> None:
+        with self._cv:
+            self._frame_subscribers.discard(callback)
 
     def get_action(self) -> list[dict[str, Any]]:
         with self._cv:

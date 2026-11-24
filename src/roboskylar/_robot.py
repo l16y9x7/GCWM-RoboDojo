@@ -195,6 +195,35 @@ class RobotBase:
         with Image.open(io.BytesIO(data)) as img:
             return np.asarray(img.convert("RGB"))
 
+    def sim_frames(self, step: int = -1, *, sim_step: int | None = None) -> list[dict[str, Any]]:
+        """Read the ordered Bridge frames captured during primitive step ``step``.
+
+        ``step`` is the primitive step (``-1`` means the latest); ``sim_step``
+        optionally selects its one-based receive-order frame number. Each result
+        includes ``seq``, ``source_step``, ``sim_step``, ``tool`` and RGB numpy
+        arrays in its ``images`` mapping.
+        """
+        reader = getattr(self._backend, "sim_frames", None)
+        if not callable(reader):
+            raise RuntimeError("this backend does not record simulator frames")
+        frames = reader(step=int(step))
+        if sim_step is not None:
+            index = int(sim_step)
+            frames = [frame for frame in frames if frame["sim_step"] == index]
+            if not frames:
+                raise IndexError(f"sim_step {index} is not recorded for primitive step {step}")
+        import numpy as np
+        from PIL import Image
+
+        decoded = []
+        for frame in frames:
+            images = {}
+            for camera, data in frame["images"].items():
+                with Image.open(io.BytesIO(data)) as image:
+                    images[camera] = np.asarray(image.convert("RGB"))
+            decoded.append({**frame, "images": images})
+        return decoded
+
     def world_map(self, camera: str, *, resolution: str = "high", step: int = -1) -> Any:
         """Load the per-pixel world coordinates of a recorded image.
 
@@ -335,6 +364,8 @@ class RobotBase:
             result = build(payload)
             record.ok = True
             record.summary = self._summary(tool, payload)
+            if envelope is not None and envelope.get("step") is not None:
+                record.summary["step"] = int(envelope["step"])
             return result
         except BaseException as exc:
             record.error = f"{type(exc).__name__}: {exc}"

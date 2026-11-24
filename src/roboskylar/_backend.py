@@ -37,6 +37,9 @@ class Backend(Protocol):
     def artifact(self, name: str, step: int = -1) -> bytes:
         """Return the bytes of a recorded observation artifact."""
 
+    def sim_frames(self, step: int = -1) -> list[dict[str, Any]]:
+        """Return the ordered simulator frames recorded during a primitive step."""
+
     def env_steps(self) -> int | None:
         """Total simulator steps executed so far (``None`` if unknown)."""
 

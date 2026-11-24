@@ -49,7 +49,8 @@ ARMS = ("cells", "program")
 #: When camera images are attached to a tool result: after a turn that moved,
 #: after each state-changing primitive, only when ``robo.show()`` is called,
 #: or never.
-IMAGE_POLICIES = ("on-motion", "on-primitive", "on-demand", "none")
+IMAGE_POLICIES = ("on-motion", "on-primitive", "on-sim-step", "on-demand", "none")
+IMAGE_RETURN_MODES = ("all", "final", "none")
 #: What a tool result contains besides the program's own output.  ``pure`` is
 #: python-tool semantics: stdout, stderr, the exception, the trailing value and
 #: whatever ``robo.show()`` asked for, nothing else.  ``rich`` adds the robot
@@ -167,6 +168,7 @@ class ArmToolkit:
         self.max_turns = max_turns
         self.turn_budget_exhausted = False
         self.images = images
+        self._image_return_override: str | None = None
         self.finish: dict[str, Any] | None = None
         self.turns: list[dict[str, Any]] = []
         self._lock = threading.Lock()
@@ -225,12 +227,20 @@ class ArmToolkit:
                     "(the robot), `np`, `math` and `time` are defined. "
                     "Variables, functions and imports persist between calls. "
                     "Returns stdout, stderr, the exception if any, the value of a "
-                    "trailing expression, the robot state, and the current camera "
-                    "images whenever the robot moved."
+                    "trailing expression, the robot state, and camera images "
+                    "according to the configured policy. Set `image_return` to "
+                    "`all`, `final` or `none` to override it."
                 ),
                 "input_schema": {
                     "type": "object",
-                    "properties": {"code": {"type": "string", "description": "Python source"}},
+                    "properties": {
+                        "code": {"type": "string", "description": "Python source"},
+                        "image_return": {
+                            "type": "string",
+                            "enum": list(IMAGE_RETURN_MODES),
+                            "description": "override this call's configured image policy",
+                        },
+                    },
                     "required": ["code"],
                 },
             }
@@ -248,13 +258,20 @@ class ArmToolkit:
                     "in the workspace. Each program starts from a fresh namespace "
                     "(workspace files persist and can be imported). Returns "
                     "stdout, stderr, the exception if any, the ledger of primitive "
-                    "calls, the robot state and the current camera images." + budget
+                    "calls, the robot state and camera images according to the "
+                    "configured policy. Set `image_return` to `all`, `final` or "
+                    "`none` to override it." + budget
                 ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "code": {"type": "string", "description": "full program source"},
                         "path": {"type": "string", "description": "workspace-relative .py file"},
+                        "image_return": {
+                            "type": "string",
+                            "enum": list(IMAGE_RETURN_MODES),
+                            "description": "override this call's configured image policy",
+                        },
                     },
                 },
             }
@@ -262,6 +279,10 @@ class ArmToolkit:
 
     def execute_tool(self, name: str, input_dict: dict[str, Any]) -> ArmResult:
         with self._lock:
+            image_return = input_dict.get("image_return")
+            if image_return is not None and image_return not in IMAGE_RETURN_MODES:
+                return ArmResult({"error": f"image_return must be one of {IMAGE_RETURN_MODES}"})
+            self._image_return_override = image_return
             # Primitive telemetry is emitted while the Python cell is still
             # executing.  The ledger hook uses this context to associate each
             # primitive with its cell before the final calls.jsonl is written.
@@ -302,6 +323,7 @@ class ArmToolkit:
                 }
             )
             self.robo._ledger.set_context()
+            self._image_return_override = None
             if flags:
                 self.sandbox_flags.append({"turn": len(self.turns) - 1, "flags": flags})
             return result
@@ -368,7 +390,29 @@ class ArmToolkit:
         images: list[bytes] = []
         requested = self.robo._take_show_requests()
         attached: list[str] = []
-        if self.images == "on-primitive" and moved:
+        policy = self.images
+        image_return = getattr(self, "_image_return_override", None)
+        if image_return == "all":
+            policy = "on-sim-step"
+        elif image_return == "final":
+            policy = "on-motion"
+        elif image_return == "none":
+            policy = "none"
+        if policy == "on-sim-step" and moved:
+            for record in records:
+                if not record.stateful or record.summary.get("step") is None:
+                    continue
+                try:
+                    frames = self.robo.sim_frames(step=int(record.summary["step"]))
+                except (IndexError, RuntimeError, OSError, ValueError):
+                    continue
+                for frame in frames:
+                    for camera, data in frame["images"].items():
+                        images.append(_to_png(data))
+                        attached.append(
+                            f"step_{frame['step']:04d}_sim_{frame['sim_step']:03d}_{camera}"
+                        )
+        elif policy == "on-primitive" and moved:
             for record in records:
                 if not record.stateful or record.summary.get("step") is None:
                     continue
@@ -378,7 +422,7 @@ class ArmToolkit:
                         attached.append(name)
                     except Exception:  # noqa: BLE001 - image is optional
                         continue
-        elif self.images == "on-motion" and moved:
+        elif policy == "on-motion" and moved:
             wanted = list(type(self.robo).ON_MOTION_IMAGES)
             for name in wanted:
                 try:
@@ -386,7 +430,7 @@ class ArmToolkit:
                     attached.append(name)
                 except Exception:  # noqa: BLE001 - image is optional
                     continue
-        elif self.images == "on-demand":
+        elif policy == "on-demand":
             wanted = self.robo._show_artifacts(requested)
             for name in wanted:
                 try:
@@ -853,6 +897,14 @@ IMAGE_NOTES = {
         "state-changing primitive in that call are attached in execution order. "
         "This can produce several image sets for one script."
     ),
+    "on-sim-step": (
+        "At the end of each tool call, every Bridge image frame captured while "
+        "each state-changing primitive ran is attached in receive order, including "
+        "the last frame. Read frames in code with `robo.sim_frames(step)`; use "
+        "the tool argument `image_return='final'` to return only the final "
+        "observation. Each frame has an `images` mapping of RGB numpy arrays; "
+        "pass a processed image to `display(image)` to attach it to the result."
+    ),
     "on-demand": (
         "Images are NOT attached automatically: call {show_examples} "
         "to see a current camera view, or "
@@ -1133,6 +1185,7 @@ __all__ = [
     "FEEDBACK_MODES",
     "GUIDES_NOTE",
     "IMAGE_POLICIES",
+    "IMAGE_RETURN_MODES",
     "ArmResult",
     "ArmToolkit",
     "arm_contract",

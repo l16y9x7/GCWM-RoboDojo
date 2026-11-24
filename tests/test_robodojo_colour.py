@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 from roboskylar._backend import EpisodeFinished
+from roboskylar.arms import ArmToolkit
 from roboskylar.hosts import robodojo_kinematics as kin
 from roboskylar.hosts import robodojo_native as native
 from roboskylar.hosts import robodojo_sight as sight
@@ -261,6 +262,7 @@ def test_the_reference_and_the_knowledge_of_the_colour_robot_promise_no_depth():
     adapter = get_adapter("robodojo_xpl_rgb")
     reference = api_reference(adapter.robot_cls, primitives="no-vla")
     assert "there is no depth image" in reference and "views" in reference
+    assert "sim_frames(step: int = -1, *, sim_step: int | None = None)" in reference
     assert "through the depth image" not in reference
     knowledge = knowledge_text(adapter.knowledge, primitives="no-vla")
     assert "no depth image" in knowledge and "pi0_pick" not in knowledge
@@ -357,9 +359,33 @@ def test_the_tools_step_roboDojos_client_through_the_bridge(tmp_path):
         "move_pose", {"xyz": [0.25, 0.0, 0.95], "arm": "right", "pitch": 45}
     )
     assert moved["log"]["result"]["reached"] is True
+    frame_root = tmp_path / "steps" / "0001"
+    frames = json.loads((frame_root / "frames.json").read_text(encoding="utf-8"))
+    assert frames
+    assert [frame["name"] for frame in frames] == [
+        f"sim_{index:03d}" for index in range(1, len(frames) + 1)
+    ]
+    assert [frame["seq"] for frame in frames] == sorted(frame["seq"] for frame in frames)
+    assert len(frames) == moved["log"]["result"]["steps_used"]
+    assert (frame_root / "sim_001" / "cam_head.png").is_file()
+    assert (frame_root / "final" / "cam_head.png").is_file()
+    robot = get_adapter("robodojo_xpl_rgb").robot_cls(backend)
+    sim_frames = robot.sim_frames(step=1)
+    assert [frame["sim_step"] for frame in sim_frames] == list(range(1, len(frames) + 1))
+    assert [frame["seq"] for frame in sim_frames] == [frame["seq"] for frame in frames]
+    assert sim_frames[0]["images"]["cam_head"].shape[-1] == 3
+    assert robot.sim_frames(step=1, sim_step=1)[0]["sim_step"] == 1
     assert (
         task_env.take_action_cnt[0] == backend.env_steps() == moved["log"]["result"]["steps_used"]
     )
+    robot.move_to([0.24, 0.0, 0.94], arm="right", pitch=45)
+    record = robot._ledger.records[-1]
+    assert record.summary["step"] == 2
+    agent_tools = ArmToolkit(
+        robot, arm="cells", workspace=tmp_path / "policy", images="on-sim-step"
+    )
+    result = agent_tools._attach_images({}, True, {}, [record])
+    assert result.images and result.result["images"][0].startswith("step_0002_sim_001_")
     assert backend.solved() is False and thread.is_alive()
     backend.conclude()  # the program has finished: RoboDojo judges the scene as it stands
     thread.join(5.0)

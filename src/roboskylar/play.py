@@ -955,7 +955,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--api-key-env", default=None)
     parser.add_argument(
         "--images",
-        choices=("on-motion", "on-primitive", "on-demand", "none"),
+        choices=("on-motion", "on-primitive", "on-sim-step", "on-demand", "none"),
         default="on-motion",
         help="when camera images are attached to tool results",
     )

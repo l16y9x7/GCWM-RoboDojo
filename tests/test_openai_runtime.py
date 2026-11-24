@@ -94,6 +94,75 @@ def test_on_primitive_attaches_each_stateful_record_frame():
     assert result.result["images"] == ["head.png", "wrist.png", "head.png", "wrist.png"]
 
 
+def test_code_tools_expose_per_call_image_return_modes():
+    toolkit = object.__new__(ArmToolkit)
+    toolkit.arm = "cells"
+    toolkit.max_programs = None
+
+    spec = toolkit.get_tools_spec()[0]
+
+    assert spec["input_schema"]["properties"]["image_return"]["enum"] == [
+        "all",
+        "final",
+        "none",
+    ]
+
+
+def test_on_sim_step_attaches_bridge_frames_in_receive_order():
+    class Robot:
+        def _take_show_requests(self):
+            return []
+
+        def sim_frames(self, *, step):
+            assert step == 4
+            return [
+                {
+                    "step": step,
+                    "sim_step": sim_step,
+                    "images": {"cam_head": bytes([sim_step])},
+                }
+                for sim_step in (1, 2)
+            ]
+
+    toolkit = object.__new__(ArmToolkit)
+    toolkit.images = "on-sim-step"
+    toolkit._image_return_override = None
+    toolkit.robo = Robot()
+    toolkit._displayed = []
+    records = [SimpleNamespace(stateful=True, summary={"step": 4})]
+
+    result = toolkit._attach_images({}, True, {}, records)
+
+    assert result.images == [bytes([1]), bytes([2])]
+    assert result.result["images"] == [
+        "step_0004_sim_001_cam_head",
+        "step_0004_sim_002_cam_head",
+    ]
+
+
+def test_image_return_none_suppresses_automatic_frames_but_keeps_display():
+    class Robot:
+        ON_MOTION_IMAGES = ("cam_head.png",)
+
+        def _take_show_requests(self):
+            return []
+
+        def sim_frames(self, *, step):
+            raise AssertionError("automatic frame lookup should be suppressed")
+
+    toolkit = object.__new__(ArmToolkit)
+    toolkit.images = "on-sim-step"
+    toolkit._image_return_override = "none"
+    toolkit.robo = Robot()
+    toolkit._displayed = [b"processed.png"]
+
+    records = [SimpleNamespace(stateful=True, summary={"step": 4})]
+    result = toolkit._attach_images({}, True, {}, records)
+
+    assert result.images == [b"processed.png"]
+    assert result.result["images"] == ["display_0"]
+
+
 def test_initial_images_remain_in_later_provider_requests(tmp_path):
     image = tmp_path / "initial.png"
     image.write_bytes(b"image-bytes")

@@ -27,6 +27,7 @@ state-changing tool's result in, which :func:`roboskylar._backend.unwrap` reads.
 from __future__ import annotations
 
 import io
+import json
 import threading
 from collections.abc import Callable
 from functools import partial
@@ -95,10 +96,15 @@ class Steps:
         step = len(self.records)
         folder = self.root / f"{step:04d}"
         folder.mkdir(exist_ok=True)
+        frames_path = folder / "frames.json"
+        if not frames_path.exists():
+            frames_path.write_text("[]\n", encoding="utf-8")
+        image_folder = folder if step == 0 else folder / "final"
+        image_folder.mkdir(exist_ok=True)
         for name, cam in (obs.get("vision") or {}).items():
             color = (cam or {}).get("color")
             if color is not None:
-                (folder / f"{name}.png").write_bytes(_png(color))
+                (image_folder / f"{name}.png").write_bytes(_png(color))
         try:
             spent = int(status.get("step", 0)) >= int(status.get("step_limit", 1 << 30))
         except (TypeError, ValueError):
@@ -125,6 +131,41 @@ class Steps:
         )
         return step
 
+    def record_sim_frame(
+        self, step: int, event: dict[str, Any], *, tool: str | None = None
+    ) -> None:
+        folder = self.root / f"{step:04d}"
+        frames_path = folder / "frames.json"
+        try:
+            frames = json.loads(frames_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            frames = []
+        frame_index = len(frames) + 1
+        frame_name = f"sim_{frame_index:03d}"
+        frame_folder = folder / frame_name
+        frame_folder.mkdir(parents=True, exist_ok=True)
+        cameras = []
+        for name, image in sorted(event["images"].items()):
+            (frame_folder / f"{name}.png").write_bytes(_png(image))
+            cameras.append(name)
+        if not cameras:
+            frame_folder.rmdir()
+            return
+        frames.append(
+            {
+                "name": frame_name,
+                "seq": int(event["seq"]),
+                "sim_step": event.get("step"),
+                "tool": tool,
+                "cameras": cameras,
+            }
+        )
+        temporary = frames_path.with_suffix(".json.tmp")
+        temporary.write_text(
+            json.dumps(frames, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+        temporary.replace(frames_path)
+
     def index(self, step: int) -> int:
         if not self.records:
             raise IndexError("no step recorded")
@@ -134,10 +175,35 @@ class Steps:
         return index
 
     def artifact_path(self, name: str, step: int = -1) -> Path:
-        return self.root / f"{self.index(step):04d}" / name
+        index = self.index(step)
+        folder = self.root / f"{index:04d}"
+        if index > 0:
+            folder = folder / "final"
+        return folder / name
 
     def load_bytes(self, name: str, step: int = -1) -> bytes:
         return self.artifact_path(name, step).read_bytes()
+
+    def sim_frames(self, step: int = -1) -> list[dict[str, Any]]:
+        index = self.index(step)
+        folder = self.root / f"{index:04d}"
+        frames = json.loads((folder / "frames.json").read_text(encoding="utf-8"))
+        result = []
+        for sim_index, frame in enumerate(frames, start=1):
+            result.append(
+                {
+                    "step": index,
+                    "sim_step": sim_index,
+                    "seq": frame["seq"],
+                    "source_step": frame.get("sim_step"),
+                    "tool": frame.get("tool"),
+                    "images": {
+                        camera: (folder / frame["name"] / f"{camera}.png").read_bytes()
+                        for camera in frame["cameras"]
+                    },
+                }
+            )
+        return result
 
 
 def segment(
@@ -192,6 +258,9 @@ class NativeToolkit:
         self.state = Steps(out_dir)
         self._verdict = verdict
         self._lock = threading.Lock()
+        self._capture_lock = threading.Lock()
+        self._capture_step: int | None = None
+        self._capture_tool: str | None = None
         self._primitives._last_obs = obs
         start = {arm: tools._joints(obs.get("state") or {}, arm) for arm in tools.ARMS}
         self._tools: dict[str, Callable[..., dict[str, Any]]] = {
@@ -203,6 +272,17 @@ class NativeToolkit:
             "segment": partial(segment, self._primitives),
         }
         self.state.record(obs, self._status())
+        bridge = getattr(env, "bridge", None)
+        self._frame_unsubscribe = None
+        if bridge is not None and callable(getattr(bridge, "subscribe_frames", None)):
+            bridge.subscribe_frames(self._record_bridge_frame)
+            self._frame_unsubscribe = bridge.unsubscribe_frames
+
+    def _record_bridge_frame(self, event: dict[str, Any]) -> None:
+        with self._capture_lock:
+            step = self._capture_step
+            if step is not None:
+                self.state.record_sim_frame(step, event, tool=self._capture_tool)
 
     def _status(self) -> dict[str, Any]:
         try:
@@ -240,12 +320,24 @@ class NativeToolkit:
         if handler is None:
             return {"error": f"this RoboDojo host has no tool {name!r}"}
         with self._lock:
+            capture_step = len(self.state.records) if name in STATEFUL else None
+            with self._capture_lock:
+                self._capture_step = capture_step
+                self._capture_tool = name if capture_step is not None else None
             try:
                 payload = handler(**kwargs)
             except Cancelled:
                 payload = {"interrupted": True, "code": "tool_cancelled"}
             except TypeError as exc:
+                with self._capture_lock:
+                    self._capture_step = None
+                    self._capture_tool = None
                 return {"error": f"{name}: {exc}"}
+            finally:
+                if capture_step is not None:
+                    with self._capture_lock:
+                        self._capture_step = None
+                        self._capture_tool = None
             if name not in STATEFUL:
                 return payload
             obs = tools._obs(self._primitives)
@@ -273,6 +365,11 @@ class NativeToolkit:
 
     def close(self) -> None:
         self._primitives.cancelled.set()
+        if self._frame_unsubscribe is not None:
+            bridge = getattr(self._primitives.env, "bridge", None)
+            if bridge is not None:
+                bridge.unsubscribe_frames(self._record_bridge_frame)
+            self._frame_unsubscribe = None
 
 
 class NativeBackend:
@@ -303,6 +400,9 @@ class NativeBackend:
 
     def artifact(self, name: str, step: int = -1) -> bytes:
         return self._toolkit.state.load_bytes(name, step=step)
+
+    def sim_frames(self, step: int = -1) -> list[dict[str, Any]]:
+        return self._toolkit.state.sim_frames(step=step)
 
     def env_steps(self) -> int | None:
         step = self._toolkit._status().get("step")

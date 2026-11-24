@@ -60,7 +60,7 @@ Extra `deploy.yml` keys beyond the shared set:
 | `primitives` | `no-vla` (this adapter serves no VLA) |
 | `runtime`, `model` | the agent that writes the programs: `openai` (a chat-completions endpoint) and the model's name there (or `ROBOSKYLAR_MODEL`) |
 | `max_turns`, `budget_s` | an episode's decision budget (model replies that call a tool) and its wall-clock limit in seconds |
-| `images`, `feedback` | `on-motion`: camera images attach after movement; `on-primitive`: attach a view after every state-changing primitive; `on-demand` attaches requested views; `pure`: a tool call returns what the program printed and nothing else |
+| `images`, `feedback` | `on-motion`: final camera images attach after movement; `on-primitive`: each state-changing primitive's final view attaches; `on-sim-step`: every Bridge frame received during each primitive attaches in receive order; `on-demand` attaches requested views; `none` disables automatic return. Each `python` / `run_program` call can override this with `image_return=all|final|none`; `display(image)` always attaches explicitly displayed processed images. `pure`: a tool call returns what the program printed and nothing else |
 | `openai_options` | passed to the endpoint with every request (`max_tokens`, `max_context_images` defaults to 40, `extra_body.reasoning_effort`); `nudges` sets the text-only replies tolerated before the episode is ended |
 | `poll_s` | the longest the policy server holds one `get_action` before answering "wait" |
 | `wrap_up_s` | the longest the verdict's acknowledgement waits for the episode's record to be written |
@@ -73,6 +73,8 @@ Environment variables: `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `ROBOSKYLAR_MODEL` (
 The policy reads what RoboDojo's client sends as it is configured (`env_cfg/arx_x5.yml`, unchanged): the three colour images, the joint and end-effector state and the instruction. It reads no depth image and no camera matrix; if a client sends them they are ignored. `setup_eval_env_client.sh` is `demo_policy`'s, and nothing in this directory touches the client's configuration.
 
 Where an object is, is measured from its masks in the cameras that see it (SAM3): the head camera's mask bounds the object's footprint on the table, a wrist camera that sees the same object settles its height. That is good to a few millimetres for things up to about 6 cm tall, worse for tall things only one camera sees, and it cannot measure what does not stand on the table (an object in the gripper, on another object, in a rack).
+
+Each episode also records the ordered camera observations received while a state-changing primitive is running under `steps/NNNN/sim_NNN/`, with the primitive's final observation under `steps/NNNN/final/`. `steps/0000/` contains the initial observation. Each step's `frames.json` indexes its received frames by Bridge sequence and source environment step; frame directories are numbered in receive order. Agent code can read a primitive's frames using `robo.sim_frames(step=NNNN)` and process the returned RGB NumPy arrays. See [simulation image frames](../../../doc/sim-image-frames.md) for the API and examples.
 
 ## Notes
 
