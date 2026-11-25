@@ -22,18 +22,18 @@ from typing import Any
 import numpy as np
 import pytest
 
-from roboskylar._backend import EpisodeFinished
-from roboskylar.arms import ArmToolkit
-from roboskylar.hosts import robodojo_kinematics as kin
-from roboskylar.hosts import robodojo_native as native
-from roboskylar.hosts import robodojo_sight as sight
-from roboskylar.hosts import robodojo_tools as tools
-from roboskylar.hosts import xpolicylab_bridge as xb
-from roboskylar.hosts.sam3_local import Segmented
-from roboskylar.prompt import api_reference, knowledge_text
-from roboskylar.robodojo_xpl import RobodojoOfficialRobot
-from roboskylar.robodojo_xpl_rgb import ObjectSight, RobodojoOfficialColourRobot, SeenPoint
-from roboskylar.robots import get_adapter
+from robodojo._backend import EpisodeFinished
+from robodojo.arms import ArmToolkit
+from robodojo.hosts import robodojo_kinematics as kin
+from robodojo.hosts import robodojo_native as native
+from robodojo.hosts import robodojo_sight as sight
+from robodojo.hosts import robodojo_tools as tools
+from robodojo.hosts import xpolicylab_bridge as xb
+from robodojo.hosts.sam3_local import Segmented
+from robodojo.prompt import api_reference, knowledge_text
+from robodojo.robodojo_xpl import RobodojoOfficialRobot
+from robodojo.robodojo_xpl_rgb import ObjectSight, RobodojoOfficialColourRobot, SeenPoint
+from robodojo.robots import get_adapter
 
 
 def _sibling(name: str):
@@ -274,7 +274,7 @@ def test_the_reference_and_the_knowledge_of_the_colour_robot_promise_no_depth():
 
 
 def _deploy():
-    path = Path(__file__).resolve().parents[1] / "integrations/xpolicylab/roboskylar/deploy.py"
+    path = Path(__file__).resolve().parents[1] / "integrations/xpolicylab/robodojo/deploy.py"
     spec = importlib.util.spec_from_file_location("pyrua_lean_deploy", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -434,7 +434,7 @@ def test_get_action_does_not_keep_the_client_waiting_while_the_program_thinks():
 
 
 def _adapter_model(monkeypatch):
-    """integrations/xpolicylab/roboskylar/model.py, over XPolicyLab's template as it is."""
+    """integrations/xpolicylab/robodojo/model.py, over XPolicyLab's template as it is."""
 
     import sys
     import types
@@ -470,7 +470,7 @@ def _adapter_model(monkeypatch):
     monkeypatch.setitem(sys.modules, "XPolicyLab.model_template", template)
     monkeypatch.setitem(sys.modules, "XPolicyLab.utils", utils)
     monkeypatch.setitem(sys.modules, "XPolicyLab.utils.process_data", process_data)
-    path = Path(__file__).resolve().parents[1] / "integrations/xpolicylab/roboskylar/model.py"
+    path = Path(__file__).resolve().parents[1] / "integrations/xpolicylab/robodojo/model.py"
     spec = importlib.util.spec_from_file_location("pyrua_lean_model", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -478,12 +478,12 @@ def _adapter_model(monkeypatch):
 
 
 def test_the_adapters_model_runs_an_episode_for_each_reset(monkeypatch, tmp_path):
-    from roboskylar import play
+    from robodojo import play
 
     played: list[dict[str, Any]] = []
 
     def play_episode(cell, out_dir, **kwargs):
-        # what roboskylar.play does with the host, without a model: boot, move, conclude
+        # what robodojo.play does with the host, without a model: boot, move, conclude
         host = get_adapter(kwargs["robot"]).host_module()
         toolkit, daemons = host.boot(cell, out_dir, env_only=True, **kwargs["boot_options"])
         backend = host.make_backend(toolkit)
@@ -531,10 +531,10 @@ def test_the_adapters_model_runs_an_episode_for_each_reset(monkeypatch, tmp_path
 
 
 def test_an_episode_under_the_adapter_runs_the_real_loop(monkeypatch, tmp_path):
-    """model.py with roboskylar.play as it is: only the provider and SAM3 are stood in for."""
+    """model.py with robodojo.play as it is: only the provider and SAM3 are stood in for."""
 
-    from roboskylar import openai_runtime as orun
-    from roboskylar.hosts import sam3_local
+    from robodojo import openai_runtime as orun
+    from robodojo.hosts import sam3_local
 
     scene = DepthScene([CUBE])
 
@@ -623,8 +623,8 @@ def test_a_trial_the_client_ends_is_wrapped_up_without_another_request(monkeypat
     point (and a rate limit on it) once held it past the client's timeout, and the trial
     the client had just judged solved was not recorded."""
 
-    from roboskylar import openai_runtime as orun
-    from roboskylar.hosts import sam3_local
+    from robodojo import openai_runtime as orun
+    from robodojo.hosts import sam3_local
 
     scene = DepthScene([CUBE])
     cell = "moved = robo.move_to([0.25, 0.0, 0.95], arm='right', pitch=45)\nprint(moved.reached)\n"
@@ -686,7 +686,7 @@ def test_the_clients_trial_stands_when_the_verdict_cannot_be_delivered():
 
 
 def test_the_adapter_runs_the_colour_robot_whatever_the_client_sends(monkeypatch, tmp_path):
-    from roboskylar import play
+    from robodojo import play
 
     robots: list[str] = []
 
@@ -1057,7 +1057,7 @@ def test_with_depth_in_the_observation_the_tools_read_it(key, tmp_path):
     assert top["world_xyz"][2] == pytest.approx(kin.TABLE_Z + 0.035, abs=0.003)
     assert "surface" not in top and top["depth_m"] > 0.3
     assert "error" in backend.execute_tool("back_project", {"row": 900, "col": 0})
-    # ... and the robot of roboskylar.robodojo runs on it as it is
+    # ... and the robot of robodojo.robodojo runs on it as it is
     robo = RobodojoOfficialRobot(backend, primitives="no-vla")
     pose = robo.locate("the cube")
     assert type(pose).__name__ == "ObjectPose" and _off(pose.center_xyz, CUBE) < 0.003
@@ -1070,9 +1070,9 @@ def test_with_depth_in_the_observation_the_tools_read_it(key, tmp_path):
 
 
 def test_the_xpolicylab_robot_is_the_robodojo_robot_and_asks_for_depth(tmp_path):
-    from roboskylar.hosts import xpolicylab_robodojo as xhost
-    from roboskylar.hosts.robodojo_cell import Cell
-    from roboskylar.robodojo import ADAPTER as base
+    from robodojo.hosts import xpolicylab_robodojo as xhost
+    from robodojo.hosts.robodojo_cell import Cell
+    from robodojo.robodojo import ADAPTER as base
 
     adapter = get_adapter("robodojo_xpl")
     assert adapter.knowledge == base.knowledge and adapter.host.endswith("xpolicylab_robodojo")
@@ -1100,7 +1100,7 @@ def _checkout(tmp_path):
 
     import yaml
 
-    from roboskylar.hosts import xpolicylab_robodojo as xhost
+    from robodojo.hosts import xpolicylab_robodojo as xhost
 
     source = tmp_path / "RoboDojo"
     for part in xhost.client_root().SOURCE_PARTS:
@@ -1133,7 +1133,7 @@ def _checkout(tmp_path):
 def test_the_host_switches_depth_on_in_its_own_copy_of_the_config(tmp_path):
     import yaml
 
-    from roboskylar.hosts import xpolicylab_robodojo as xhost
+    from robodojo.hosts import xpolicylab_robodojo as xhost
 
     source, top = _checkout(tmp_path)
     xpl = xhost._xpolicylab_root(None, source)  # the checkout's own
@@ -1160,9 +1160,9 @@ def test_the_host_switches_depth_on_in_its_own_copy_of_the_config(tmp_path):
     assert (bench / "XPolicyLab" / "utils" / "process_data.py").is_file()
     assert sorted(p.name for p in (bench / "XPolicyLab" / "policy").iterdir()) == [
         "__init__.py",
-        "roboskylar",
+        "robodojo",
     ]
-    assert (bench / "XPolicyLab" / "policy" / "roboskylar" / "deploy.py").is_file()
+    assert (bench / "XPolicyLab" / "policy" / "robodojo" / "deploy.py").is_file()
     assert not (bench / "XPolicyLab" / ".git").exists()
     # RoboDojo's own tree is as it was; without depth the copy keeps its switches
     assert yaml.safe_load((source / "env_cfg" / "arx_x5.yml").read_text()) == top
@@ -1171,17 +1171,17 @@ def test_the_host_switches_depth_on_in_its_own_copy_of_the_config(tmp_path):
 
 
 def test_the_host_picks_one_layout_the_way_xpolicylab_does(tmp_path):
-    from roboskylar.hosts import xpolicylab_robodojo as xhost
-    from roboskylar.hosts.robodojo_cell import Cell
+    from robodojo.hosts import xpolicylab_robodojo as xhost
+    from robodojo.hosts.robodojo_cell import Cell
 
     source, _ = _checkout(tmp_path)
     bench = xhost.lay_out(tmp_path / "bench", source, source / "XPolicyLab", depth=True)
     cell = Cell(suite="arx_x5", task="stack_blocks", seed=2)
-    info = "ckpt_name=roboskylar,action_type=joint"
+    info = "ckpt_name=robodojo,action_type=joint"
     manifest = xhost.only_layout(bench, cell, eval_seed=0, additional_info=info, run_id="run-7")
     # where RoboDojo's client looks for it, relative to the directory it runs from
     assert manifest == (
-        bench / "eval_result/RoboDojo/stack_blocks/roboskylar/arx_x5" / f"0_{info}"
+        bench / "eval_result/RoboDojo/stack_blocks/robodojo/arx_x5" / f"0_{info}"
         / "_resume_run-7.json"
     )  # fmt: skip
     data = json.loads(manifest.read_text())
@@ -1202,7 +1202,7 @@ def test_the_host_picks_one_layout_the_way_xpolicylab_does(tmp_path):
 def test_a_root_with_depth_can_write_its_results_into_the_checkout(tmp_path):
     import yaml
 
-    from roboskylar.hosts import xpolicylab_robodojo as xhost
+    from robodojo.hosts import xpolicylab_robodojo as xhost
 
     source, top = _checkout(tmp_path)
     module = xhost.client_root()
@@ -1219,7 +1219,7 @@ def test_a_root_with_depth_can_write_its_results_into_the_checkout(tmp_path):
 def test_the_adapter_starts_the_client_as_robodojo_configures_it():
     """The submitted directory holds nothing that changes what the client sends."""
 
-    adapter = Path(__file__).resolve().parents[1] / "integrations/xpolicylab/roboskylar"
+    adapter = Path(__file__).resolve().parents[1] / "integrations/xpolicylab/robodojo"
     assert not (adapter / "client_root.py").exists()
     client = (adapter / "setup_eval_env_client.sh").read_text()
     assert "env_cfg" not in client.replace("env_cfg_type", "") and "client_root" not in client

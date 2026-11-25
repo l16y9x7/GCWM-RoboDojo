@@ -59,7 +59,7 @@ OpenAI runtime 会把初始任务图片以及工具结果附带的图片保留�
 
 ### 当前实现位置
 
-`src/roboskylar/arms.py` 实现 `on-motion`、`on-primitive`、`on-demand` 和 `none` 四种附图策略；XPolicyLab 部署配置当前使用 `on-primitive`，见 `integrations/xpolicylab/roboskylar/deploy.yml`。`src/roboskylar/openai_runtime.py` 将初始任务图和工具图像加入后续模型请求，并在超过 `max_context_images` 时从请求 transcript 中删除最旧图片；图像文件仍保留在运行记录目录。按目标开始/完成标记分组图像、目标完成后只保留终态图的规则仍是交互建议，当前没有自动实现。
+`src/robodojo/arms.py` 实现 `on-motion`、`on-primitive`、`on-demand` 和 `none` 四种附图策略；XPolicyLab 部署配置当前使用 `on-primitive`，见 `integrations/xpolicylab/robodojo/deploy.yml`。`src/robodojo/openai_runtime.py` 将初始任务图和工具图像加入后续模型请求，并在超过 `max_context_images` 时从请求 transcript 中删除最旧图片；图像文件仍保留在运行记录目录。按目标开始/完成标记分组图像、目标完成后只保留终态图的规则仍是交互建议，当前没有自动实现。
 
 ## 提示词的新增部分
 
@@ -153,4 +153,4 @@ OpenAI runtime 会把初始任务图片以及工具结果附带的图片保留�
 
 ## 实现位置
 
-动作闭环规则写在 `src/roboskylar/arms.py` 的 `CELLS_CONTRACT` 和 `PROGRAM_CONTRACT` 中，分别约束持久 Python 会话和独立程序工具。工具执行后返回结果和配置允许的图像，模型据此决定下一阶段；机器人动作本身不会在脚本执行期间调用语言模型。RoboDojo RGB 的移动反馈会附加头部和左右腕部相机图像，其他机器人以各自配置的相机为准。
+动作闭环规则写在 `src/robodojo/arms.py` 的 `CELLS_CONTRACT` 和 `PROGRAM_CONTRACT` 中，分别约束持久 Python 会话和独立程序工具。工具执行后返回结果和配置允许的图像，模型据此决定下一阶段；机器人动作本身不会在脚本执行期间调用语言模型。RoboDojo RGB 的移动反馈会附加头部和左右腕部相机图像，其他机器人以各自配置的相机为准。

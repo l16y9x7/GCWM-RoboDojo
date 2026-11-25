@@ -5,8 +5,8 @@ from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
-from roboskylar.arms import ArmResult, ArmToolkit
-from roboskylar.openai_runtime import _Transcript, run_openai_agent
+from robodojo.arms import ArmResult, ArmToolkit
+from robodojo.openai_runtime import _Transcript, run_openai_agent
 
 
 def test_transcript_keeps_image_parts_and_records_archive_refs(tmp_path):

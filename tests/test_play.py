@@ -1,4 +1,4 @@
-"""Offline checks of the Codex event audit in ``roboskylar.play``."""
+"""Offline checks of the Codex event audit in ``robodojo.play``."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from roboskylar.arms import arm_contract
-from roboskylar.generate import CODEX_CATALOG, codex_catalog_flags
-from roboskylar.hosts.common import RpentBackend
-from roboskylar.play import (
+from robodojo.arms import arm_contract
+from robodojo.generate import CODEX_CATALOG, codex_catalog_flags
+from robodojo.hosts.common import RpentBackend
+from robodojo.play import (
     _agent_environment,
     _audit_events,
     _codex_argv,

@@ -10,9 +10,9 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from roboskylar.hosts import robodojo_kinematics as kin  # noqa: E402
-from roboskylar.hosts import robodojo_tools as tools  # noqa: E402
-from roboskylar.robodojo import gripper_angles  # noqa: E402
+from robodojo.hosts import robodojo_kinematics as kin  # noqa: E402
+from robodojo.hosts import robodojo_tools as tools  # noqa: E402
+from robodojo.robodojo import gripper_angles  # noqa: E402
 
 #: (arm, the six joints, the reported end-effector pose [x, y, z, w, qx, qy, qz]) from RoboDojo
 #: runs: the start pose and three far from it per arm.

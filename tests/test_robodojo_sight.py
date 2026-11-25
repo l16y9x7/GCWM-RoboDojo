@@ -21,9 +21,9 @@ from typing import Any
 import numpy as np
 import pytest
 
-from roboskylar.hosts import robodojo_kinematics as kin
-from roboskylar.hosts import robodojo_sight as sight
-from roboskylar.hosts import robodojo_tools as tools
+from robodojo.hosts import robodojo_kinematics as kin
+from robodojo.hosts import robodojo_sight as sight
+from robodojo.hosts import robodojo_tools as tools
 
 #: The end-effector poses the arms start an episode with (the simulator's ``<arm>_ee_pose``).
 HOME = {
