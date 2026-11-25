@@ -35,7 +35,11 @@ def test_arm_contracts_include_planning_motion_and_image_context_rules():
         assert "Summary (after every tool result)" in contract
         assert "Plan follows planning principles: yes / no / not applicable" in contract
         assert "from opposite sides" in contract
-        assert "both arms are home" in contract
+        assert "both arms are home" in " ".join(contract.split())
+        assert "both grippers" in contract
+        assert "fully open" in contract
+        assert "### Insertion" in contract
+        assert "Only after alignment is confirmed" in contract
         assert "max_context_images" in contract
         assert "head view and both wrist views" not in contract
         assert "vertically downward orientation" not in contract

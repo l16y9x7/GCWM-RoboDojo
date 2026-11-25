@@ -59,7 +59,8 @@ a pick-and-place plan should include:
 4. Move while holding the object to a position near the destination and
    confirm arrival.
 5. Place the object and confirm placement.
-6. Return both arms home and confirm they are home.
+6. Fully open both grippers, return both arms home, and confirm both arms
+   are home with both grippers fully open.
 
 The complete plan must state the final goal, known scene facts, and unresolved
 questions. For every milestone, specify its target state and observable
@@ -127,10 +128,12 @@ becomes unsafe or obstructs the task, replan and confirm a new safe observer
 pose before continuing. Choose the pose for the current scene; do not assume a
 fixed coordinate works in every scene.
 
-After the task result is confirmed, make returning both arms home the final
-execution milestone. Inspect robot state and confirm both arms are home before
-submitting the task. Do not submit while either the task result or home state
-is unconfirmed.
+After the task result is confirmed, make fully opening both grippers and
+returning both arms home the final execution milestone. Call
+`set_gripper(arm, robo.OPEN)` for each arm, then return both arms home. Inspect
+robot state and confirm both arms are home and both grippers are fully open
+before submitting the task. Do not submit while the task result or any part of
+this final state is unconfirmed.
 
 ## Module 3: Motion Rules
 
@@ -161,6 +164,17 @@ inspect. Check the images and robot state, and correct the position if needed.
 Release only in a later, separate tool call once alignment is credible. After
 releasing, inspect the images and state to confirm that the object was placed
 successfully.
+
+### Insertion
+
+For an insertion, first move the working hand to the approach position aligned
+with the insertion point and stop before entering it. In a separate tool call,
+move the other hand to a suitable observation position where it can see the
+insertion point and the working hand without blocking either. Inspect the
+images and robot state to confirm the working hand and object are aligned with
+the opening. Only after alignment is confirmed, use a separate tool call to
+perform the insertion. If alignment is uncertain, adjust or observe again; do
+not insert based only on the commanded pose.
 
 ### Two-arm Collaboration and Handoffs
 
