@@ -6,22 +6,18 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 
-"""RoboDojo tools of this library's own, registered on RPent's toolkit at boot.
-
-RPent's RoboDojo toolset moves an arm only by position (``move_to``) and grips one native
-action at a time (``set_gripper``); its perception returns one mask centroid and one surface
-point.  The tools here are what a program needs on top of that, computed in the host from the
-same observations and commanded through the same action path:
+"""The robot's tools, computed in the host from RoboDojo's observations.
 
 ``move_pose``    the grasp point to a position AND an orientation, along a straight line,
                  with the host's own IK (:mod:`.robodojo_kinematics`);
 ``grip``         a full gripper stroke, repeated until the fingers stop, with what they hold;
-``locate``       an object's 3D extent, heading and top from its mask and the depth image;
-``home``         the joints the episode started with (:func:`home`, kept from before).
+``locate``       an object's 3D extent, heading and top from its masks in the colour cameras
+                 (:mod:`.robodojo_sight`);
+``back_project`` the world point a pixel shows;
+``home``         the joints the episode started with.
 
-Every tool is registered as a stateful (not read-only) tool, so RPent's toolkit records a step
-after it like after its own motions.  Each native action is one ``env.step`` and counts against
-the episode's budget; a tool stops at the step limit.
+Each native action is one ``env.step`` and counts against the episode's budget; a tool stops
+at the step limit.  :class:`.robodojo_native.NativeToolkit` binds them to an environment.
 """
 
 from __future__ import annotations
@@ -29,7 +25,6 @@ from __future__ import annotations
 import math
 import zlib
 from collections.abc import Sequence
-from functools import partial
 from typing import Any
 
 import numpy as np
@@ -50,11 +45,11 @@ GRIP_MAX_ACTIONS = 10
 #: Largest joint change commanded in one action of a joint-space swing (radians).
 JOINT_STEP_RAD = 0.15
 #: A pose the IK misses by no more than this is taken (the closest one), with a note: in the
-#: first sweep 11 of 17 refused targets were within 2 cm and 7 degrees of a reachable pose.
+#: self-built test scene most refused targets were within 2 cm and 7 degrees of a reachable pose.
 NEAR_M = 0.02
 NEAR_DEG = 8.0
 #: ``home`` first lifts a grasp point lower than this straight up (by up to HOME_LIFT_M) so the
-#: swing back does not sweep across the table: one swing knocked a placed board off.
+#: swing back does not sweep across the table and knock objects over.
 HOME_LIFT_BELOW = 1.0
 HOME_LIFT_M = 0.06
 #: ``locate`` measures a footprint on a grid this fine (metres), one point per occupied cell:
@@ -66,7 +61,7 @@ FOOTPRINT_CELL_M = 0.002
 #: axis of its own and takes the sides of the smallest rectangle around it.
 LONG_FOOTPRINT = 1.4
 #: The extents of a footprint leave this percentage of its cells outside at either end: a few
-#: stray cells at the mask's edge do not stretch it, and a thin end (a brush's head) stays in.
+#: stray cells at the mask's edge do not stretch it, and a thin end stays in.
 FOOTPRINT_TRIM = 0.5
 #: The lowest points of a mask are as often what the object stands on as the object (a pad
 #: under a cube, 5 mm high, added 1.5 cm to its footprint): for an object taller than
@@ -83,7 +78,7 @@ ROUND_MAX_RADIUS_M = 0.12
 ROUND_FIT = 0.04
 ROUND_MIN_ARC_DEG = 100.0
 #: ... and, of three or more such slices, one whose centre is further than this (metres) from
-#: the median of their centres is dropped: a sparse slice of a doll once fitted a circle twice
+#: the median of their centres is dropped: a sparse slice can fit a circle far
 #: too large.  More than half of them have to be that close, or none is used.
 ROUND_AXIS_M = 0.006
 #: The gripper beyond the arm's links, in the end-effector link's frame (x the pointing
@@ -121,15 +116,15 @@ PROBE_REACH_PX = 2.5
 PROBE_TABLE_SHARE = 0.25
 #: ``move_pose`` may take the half-turned pose (fingers swapped) only with a gripper this open.
 OPEN_FOR_HALF_TURN = 0.9
-#: A gripper closed on nothing reads an opening of 0.0 (448 closes in the sweeps read under
-#: 0.0025 and six more under 0.01); after a close, an opening above this means the fingers
-#: stopped on something.  It was 0.05 once: a coin, a key or a mug's handle stops them between
-#: 0.01 and 0.05, and 47 such closes were reported as holding nothing.
+#: A gripper closed on nothing reads an opening of 0.0 (in the self-built test scene almost
+#: every empty close read under 0.0025, all under 0.01); after a close, an opening above this
+#: means the fingers stopped on something.  A higher threshold misses thin parts, which stop
+#: the fingers between 0.01 and 0.05.
 HOLD_MIN_OPENING = 0.01
 #: The width of what is held at a measured opening, metres: GRIP_ZERO_M + GRIP_SPAN_M x
-#: opening.  Fitted in the simulator to cubes of 3.0 and 3.5 cm held across two faces
-#: (openings 0.254 and 0.300) and across the diagonal (0.368 and 0.433) and to an 8 cm bottle
-#: (0.711): all five within 0.5 mm.  The fingers' travel in the URDF, 0.088 m, is not the
+#: opening.  Fitted in a self-built simulation test scene to cubes of 3.0 and 3.5 cm held
+#: across two faces (openings 0.254 and 0.300) and across the diagonal (0.368 and 0.433) and
+#: to an 8 cm cylinder (0.711): all five within 0.5 mm.  The fingers' travel in the URDF, 0.088 m, is not the
 #: span: with it a 3.5 cm cube read 2.6 cm.
 GRIP_ZERO_M = 0.0023
 GRIP_SPAN_M = 0.1091
@@ -656,69 +651,8 @@ def home(
 # ---------------------------------------------------------------------------
 
 
-def _on_robot(state: dict[str, Any], points: np.ndarray, radius: float = 0.045) -> np.ndarray:
-    """Which world points lie on either arm: within ``radius`` of its links (base to the tips),
-    on the rail of its gripper or on one of its fingers, wherever those stand open."""
-
-    hit = np.zeros(len(points), dtype=bool)
-
-    def near(a: np.ndarray, b: np.ndarray, within: float) -> np.ndarray:
-        ab = b - a
-        n = float(ab @ ab)
-        t = np.clip(((points - a) @ ab) / n, 0.0, 1.0) if n > 1e-12 else np.zeros(len(points))
-        return np.linalg.norm(points - (a + t[:, None] * ab), axis=1) < within
-
-    for arm in ARMS:
-        try:
-            q = _joints(state, arm)
-        except (KeyError, TypeError, ValueError):
-            continue
-        if len(q) != 6:
-            continue
-        fr = kin.frames(arm, q)
-        chain = [f[:3, 3] for f in fr]
-        chain.append(fr[-1][:3, 3] + fr[-1][:3, 0] * kin.TIP_OFFSET)
-        for a, b in zip(chain, chain[1:], strict=False):
-            hit |= near(a, b, radius)
-        origin, forward, side = fr[-1][:3, 3], fr[-1][:3, 0], fr[-1][:3, 1]
-        rail = origin + forward * RAIL_AT_M
-        hit |= near(rail - side * RAIL_HALF_M, rail + side * RAIL_HALF_M, RAIL_RADIUS_M)
-        opening = min(max(_opening(state, arm), 0.0), 1.0)
-        for sign in (1.0, -1.0):
-            off = side * sign * (FINGER_CLOSED_M + FINGER_TRAVEL_M * opening)
-            hit |= near(
-                origin + forward * FINGER_FROM_M + off,
-                origin + forward * kin.TIP_OFFSET + off,
-                FINGER_RADIUS_M,
-            )
-    return hit
-
-
 def _camera(obs: dict[str, Any], camera: str) -> dict[str, Any] | None:
     return (obs.get("vision") or {}).get(camera)
-
-
-def depth_image(cam: dict[str, Any]) -> np.ndarray | None:
-    """A camera's depth along its optical axis, metres (H x W), or None when it has none.
-
-    RoboDojo's simulator gives it as ``depth`` (float metres; RPent's bridge calls the same
-    array ``distance_to_image_plane``) or as ``approximate_depth`` (whole millimetres, the
-    form its released data has), whichever its configuration switches on.
-    """
-
-    for key, scale in (
-        ("distance_to_image_plane", 1.0),
-        ("depth", 1.0),
-        ("approximate_depth", 1e-3),
-    ):
-        raw = cam.get(key)
-        if raw is None:
-            continue
-        depth = np.asarray(raw)
-        scale = 1e-3 if depth.dtype.kind in "iu" else scale  # integers are millimetres
-        depth = depth.astype(np.float64) * scale
-        return depth[..., 0] if depth.ndim == 3 else depth
-    return None
 
 
 def extrinsic_of(cam: dict[str, Any]) -> Any:
@@ -727,28 +661,6 @@ def extrinsic_of(cam: dict[str, Any]) -> Any:
 
     pose = cam.get("extrinsic_matrix")
     return cam.get("extrinsics_matrix") if pose is None else pose
-
-
-def world_points(
-    cam: dict[str, Any], rows: np.ndarray, cols: np.ndarray
-) -> tuple[np.ndarray, np.ndarray]:
-    """World points of pixels through the depth image, and which pixels had a valid depth.
-
-    The same projection as RPent's ``back_project``: Isaac cameras look along -Z and the
-    depth (``distance_to_image_plane``) is along the optical axis.
-    """
-
-    depth = depth_image(cam)
-    if depth is None:
-        raise KeyError("no depth image in the observation")
-    k = np.asarray(cam["intrinsic_matrix"], dtype=np.float64)
-    t = np.asarray(extrinsic_of(cam), dtype=np.float64)
-    d = depth[rows, cols]
-    valid = np.isfinite(d) & (d > 0)
-    r, c, d = rows[valid], cols[valid], d[valid]
-    fx, fy, cx, cy = k[0, 0], k[1, 1], k[0, 2], k[1, 2]
-    p = np.stack([(c - cx) / fx * d, -(r - cy) / fy * d, -d, np.ones_like(d)])
-    return (t @ p)[:3].T, valid
 
 
 def _cells(xy: np.ndarray, cell: float = FOOTPRINT_CELL_M) -> np.ndarray:
@@ -801,9 +713,9 @@ def _footprint(xy: np.ndarray) -> tuple[float, float, float, np.ndarray]:
 def _far_side(pts: np.ndarray) -> np.ndarray:
     """Footprint points (N x 2) of what the camera cannot see of a round object.
 
-    A camera sees the near half of an upright bottle, cup or doll, so its visible points end
-    at the middle and their footprint sits towards the camera: against the scenes' true poses
-    the centre of an upright bottle was 6 to 14 mm off and its far edge up to 2 cm short.
+    A camera sees the near half of an upright round object, so its visible points end
+    at the middle and their footprint sits towards the camera: in the self-built test scene
+    the centre of an upright cylinder was 6 to 14 mm off and its far edge up to 2 cm short.
     Each horizontal slice whose visible points lie on a circular arc is completed to the full
     circle, provided the circles of the object share one upright axis.  Flat-sided objects are
     left alone: their slices are not arcs, and their tops, which the camera does see, cover
@@ -829,9 +741,8 @@ def _far_side(pts: np.ndarray) -> np.ndarray:
             circles.append((centre, radius))
     if len(circles) >= 3:
         # The slices of a round object share an axis: a circle off it is a misfit.  And when no
-        # more than half of them share one, the object is not round about an upright axis: the
-        # body of a piggy bank lying on its feet gave four circles, two of them alike, and the
-        # two put 2 cm on its width.
+        # more than half of them share one, the object is not round about an upright axis, and
+        # fitting the few alike circles would overstate its width.
         axis = np.median(np.array([c for c, _ in circles]), axis=0)
         alike = [(c, r) for c, r in circles if np.linalg.norm(c - axis) <= ROUND_AXIS_M]
         circles = alike if 2 * len(alike) > len(circles) else []
@@ -879,33 +790,11 @@ def object_geometry(points: np.ndarray) -> dict[str, Any] | None:
 _WRISTS = {"cam_left_wrist": "left", "cam_right_wrist": "right"}
 
 
-def colour_only(primitives: Any, cam: dict[str, Any] | None = None) -> bool:
-    """Whether perception works from colour images alone.
-
-    Always when the host says so (``primitives.colour_only``, which the host for RoboDojo's
-    own evaluation client sets), and whenever the observation simply carries no depth image.
-    """
-
-    if getattr(primitives, "colour_only", False):
-        return True
-    if cam is None:
-        return False
-    return depth_image(cam) is None
-
-
 def _shown(obs: dict[str, Any]) -> dict[str, Any]:
-    """The robot state an observation's pictures show.
+    """The robot state an observation's pictures show: its own, since RoboDojo's evaluation
+    client renders the current state before it captures."""
 
-    RoboDojo's evaluation client before its commit 6e3190f hands out each picture one
-    observation late: the state is the robot's now, the pictures are of the state before the
-    last action (measured in that client: a wrist camera's picture fits the previous
-    end-effector pose to a millimetre and the current one not at all while the arm moves).  A
-    host that knows this puts the state the pictures belong to under ``image_state``; without
-    it they are taken to be current.
-    """
-
-    shown = obs.get("image_state")
-    return shown if isinstance(shown, dict) and shown else (obs.get("state") or {})
+    return obs.get("state") or {}
 
 
 def _view(camera: str, state: dict[str, Any]) -> sight.View | None:
@@ -1183,44 +1072,16 @@ def probe(primitives: Any, row: int, col: int, camera: str = "cam_head") -> dict
     return on_table()
 
 
-probe._readonly = True  # type: ignore[attr-defined]
 
 
 def back_project(primitives: Any, row: int, col: int, camera: str = "cam_head") -> dict[str, Any]:
-    """The world point a pixel shows: through the depth image where there is one.
+    """The world point a pixel shows, from the colour images alone (:func:`probe`)."""
 
-    With depth it is RPent's ``back_project`` (the same projection, the same answer and the
-    same errors), for a host that runs without RPent; without depth it is :func:`probe`.
-    """
-
-    obs = _obs(primitives)
-    cam = _camera(obs, camera)
-    if cam is None:
+    if _camera(_obs(primitives), camera) is None:
         return {"error": f"camera {camera!r} not in observation"}
-    if colour_only(primitives, cam):
-        return probe(primitives, row, col, camera)
-    depth = depth_image(cam)
-    k = np.asarray(cam.get("intrinsic_matrix"), dtype=np.float64)
-    t = np.asarray(extrinsic_of(cam), dtype=np.float64)
-    if k.shape != (3, 3) or t.shape != (4, 4):
-        return {"error": f"calibration missing/invalid: K={k.shape} T={t.shape}"}
-    h, w = int(depth.shape[0]), int(depth.shape[1])
-    row, col = int(row), int(col)
-    if not (0 <= row < h and 0 <= col < w):
-        return {"error": f"pixel out of range: row 0..{h - 1}, col 0..{w - 1}"}
-    d = float(depth[row, col])
-    if not math.isfinite(d) or d <= 0:
-        return {"error": f"invalid depth at pixel: {d}"}
-    points, _valid = world_points(cam, np.array([row]), np.array([col]))
-    return {
-        "camera": camera,
-        "pixel": [row, col],
-        "depth_m": round(d, 4),
-        "world_xyz": [round(float(v), 4) for v in points[0]],
-    }
+    return probe(primitives, row, col, camera)
 
 
-back_project._readonly = True  # type: ignore[attr-defined]
 
 
 def locate(
@@ -1229,7 +1090,7 @@ def locate(
     camera: str = "cam_head",
     min_score: float = 0.2,
 ) -> dict[str, Any]:
-    """Segment an object by text and measure it in 3D from the depth image."""
+    """Segment an object by text and measure it in 3D from its masks in the colour cameras."""
 
     if not isinstance(text_prompt, str) or not text_prompt.strip():
         return {"error": "text_prompt must be a non-empty string"}
@@ -1277,158 +1138,37 @@ def locate(
         "area_px": int(mask.sum()),
         "centroid_rc": [int(rows.mean()), int(cols.mean())] if len(rows) else None,
     }
-    if colour_only(primitives, cam):
-        view = _view(camera, _shown(obs))
-        if view is not None:
-            outline = sight.robot_pixels(
-                view, _shown(obs), own=_WRISTS.get(camera), scale=1.0, between=False
-            )
-            share = float(outline[mask].mean()) if mask.any() else 0.0
-            if share > 0:
-                out["robot_px_fraction"] = round(share, 3)
-            if share >= ROBOT_MASK_SHARE and float(res.score) < ROBOT_MASK_SCORE:
-                out["views"] = 1
-                out["geometry_error"] = "the mask lies on the robot's own arm or gripper"
-                return out
-        geo, seen = _measure_in_colour(primitives, obs, camera, mask, text_prompt, float(min_score))
-        out["views"] = seen["views"]
-        if seen.get("guess"):
-            out["height_guess"] = seen["guess"]
-        if geo is None:
-            out["geometry_error"] = (
-                seen.get("hidden") or "too little of it above the table (flat, far or hidden)"
-            )
+    view = _view(camera, _shown(obs))
+    if view is not None:
+        outline = sight.robot_pixels(
+            view, _shown(obs), own=_WRISTS.get(camera), scale=1.0, between=False
+        )
+        share = float(outline[mask].mean()) if mask.any() else 0.0
+        if share > 0:
+            out["robot_px_fraction"] = round(share, 3)
+        if share >= ROBOT_MASK_SHARE and float(res.score) < ROBOT_MASK_SCORE:
+            out["views"] = 1
+            out["geometry_error"] = "the mask lies on the robot's own arm or gripper"
             return out
-        x, y = float(geo["center_xyz"][0]), float(geo["center_xyz"][1])
-        if not (
-            kin.TABLE_X[0] - OFF_TABLE_M <= x <= kin.TABLE_X[1] + OFF_TABLE_M
-            and kin.TABLE_Y[0] - OFF_TABLE_M <= y <= kin.TABLE_Y[1] + OFF_TABLE_M
-        ):
-            out["geometry_error"] = "what the mask shows is not on the table"
-            return out
-        out.update(geo)
-        _demo_event(primitives, "robo.locate", "无深度多视角测量完成", "done")
-        return out
-    try:
-        points, _valid = world_points(cam, rows, cols)
-    except Exception as exc:  # noqa: BLE001 - a missing depth image is a result, not a crash
-        out["geometry_error"] = f"no depth: {exc}"
-        return out
-    on_robot = _on_robot(_shown(obs), points)
-    if on_robot.any():
-        out["robot_px_fraction"] = round(float(on_robot.mean()), 3)
-        points = points[~on_robot]
-    geo = object_geometry(points)
+    geo, seen = _measure_in_colour(primitives, obs, camera, mask, text_prompt, float(min_score))
+    out["views"] = seen["views"]
+    if seen.get("guess"):
+        out["height_guess"] = seen["guess"]
     if geo is None:
         out["geometry_error"] = (
-            "the mask lies on the robot's own arm or gripper"
-            if out.get("robot_px_fraction", 0) > 0.5
-            else "too few points above the table (flat, far or hidden)"
+            seen.get("hidden") or "too little of it above the table (flat, far or hidden)"
         )
         return out
+    x, y = float(geo["center_xyz"][0]), float(geo["center_xyz"][1])
+    if not (
+        kin.TABLE_X[0] - OFF_TABLE_M <= x <= kin.TABLE_X[1] + OFF_TABLE_M
+        and kin.TABLE_Y[0] - OFF_TABLE_M <= y <= kin.TABLE_Y[1] + OFF_TABLE_M
+    ):
+        out["geometry_error"] = "what the mask shows is not on the table"
+        return out
     out.update(geo)
+    _demo_event(primitives, "robo.locate", "无深度多视角测量完成", "done")
     return out
-
-
-#: Changes nothing in the scene: RPent's toolkit records no step after it (its ``readonly``).
-locate._readonly = True  # type: ignore[attr-defined]
-
-
-# ---------------------------------------------------------------------------
-# registration
-# ---------------------------------------------------------------------------
-
-_ARM = {"type": "string", "enum": list(ARMS)}
-SPECS: dict[str, dict[str, Any]] = {
-    "move_pose": {
-        "name": "move_pose",
-        "description": "Move an arm's grasp point to a position and orientation (degrees) with "
-        "the host's IK; angles left out keep their current value.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "xyz": {"type": "array", "items": {"type": "number"}},
-                "arm": _ARM,
-                "gripper": {"type": "number"},
-                "pitch": {"type": "number"},
-                "yaw": {"type": "number"},
-                "roll": {"type": "number"},
-                "path": {"type": "string", "enum": ["auto", "line", "joint"]},
-            },
-            "required": ["xyz"],
-        },
-    },
-    "grip": {
-        "name": "grip",
-        "description": "Close (1) or open (-1) a gripper fully and report what it holds.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "arm": _ARM,
-                "gripper": {"type": "number"},
-                "opening": {"type": "number"},
-            },
-            "required": ["gripper"],
-        },
-    },
-    "locate": {
-        "name": "locate",
-        "description": "Segment an object by text and measure its extent, heading and height.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "text_prompt": {"type": "string"},
-                "camera": {"type": "string"},
-                "min_score": {"type": "number"},
-            },
-            "required": ["text_prompt"],
-        },
-    },
-    "back_project": {
-        "name": "back_project",
-        "description": "The world point a pixel shows: on the object under it, else on the table.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "row": {"type": "integer"},
-                "col": {"type": "integer"},
-                "camera": {"type": "string"},
-            },
-            "required": ["row", "col"],
-        },
-    },
-    "home": {
-        "name": "home",
-        "description": "Return one arm or both to the joint angles the episode started with; "
-        "gripper openings are kept.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"arm": {"type": "string", "enum": [*ARMS, "both"]}},
-            "required": [],
-        },
-    },
-}
-
-
-def register(toolkit: Any) -> None:
-    """Add this module's tools to a freshly booted RoboDojo toolkit.
-
-    The joint angles of ``home`` are read here: boot leaves both arms at their origin.  RPent's
-    toolkit records a step after every handler except ``locate`` (marked read-only; RPent
-    looks through the ``partial``).
-    """
-
-    primitives = toolkit._primitives
-    state = primitives.env.get_obs().get("state", {})
-    start = {arm: _joints(state, arm) for arm in ARMS}
-    handlers = {
-        "move_pose": partial(move_pose, primitives, start),
-        "grip": partial(grip, primitives),
-        "locate": partial(locate, primitives),
-        "home": partial(home, primitives, start),
-    }
-    for name, handler in handlers.items():
-        toolkit.add_tool(name, SPECS[name], handler)
 
 
 __all__ = [
@@ -1437,10 +1177,7 @@ __all__ = [
     "HOLD_MIN_OPENING",
     "HOME_MAX_ACTIONS",
     "HOME_TOL_RAD",
-    "SPECS",
     "back_project",
-    "colour_only",
-    "depth_image",
     "extrinsic_of",
     "grip",
     "home",
@@ -1448,6 +1185,4 @@ __all__ = [
     "move_pose",
     "object_geometry",
     "probe",
-    "register",
-    "world_points",
 ]

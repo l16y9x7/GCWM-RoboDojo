@@ -6,22 +6,21 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 
-"""A RoboDojo toolkit that needs nothing but an environment.
+"""The robot's toolkit over RoboDojo's evaluation client.
 
-RPent's ``RoboDojoToolkit`` wraps RPent's simulator bridge and records RPent's artifacts.  Under
-RoboDojo's own evaluation client there is no RPent: there is an observation (three colour
-images and the robot's state, with a depth image and the cameras' matrices when the client's
-configuration switches them on) and an action that takes joint targets.
-:class:`NativeToolkit` is what the robot class needs on top of that and no more: the tools of
-:mod:`.robodojo_tools` (through the depth image where the observation has one, from colour
-alone where it has not), ``segment``, the recorded steps (``view_env_state``, the images and
-the cameras' calibration of each step) and the envelope RPent's toolkit wraps a
-state-changing tool's result in, which :func:`robodojo._backend.unwrap` reads.
+The client gives an observation (three colour images and the robot's state) and takes an
+action of joint targets.  :class:`NativeToolkit` is what the robot class needs on top of that
+and no more: the tools of :mod:`.robodojo_tools` (from the colour images alone), ``segment``,
+the recorded steps (``view_env_state``, the images of each step, and the cameras' calibration
+where the client sends it) and the envelope a state-changing tool's result comes in, which
+:func:`robodojo._backend.unwrap` reads.
 
-``env`` is anything with ``get_obs() -> dict`` (``vision`` / ``state`` / ``instruction``),
+``env`` is anything with ``get_obs() -> dict`` (``vision`` / ``state``, and the task's official
+description in ``extra_info["detailed_instruction"]`` or else ``instruction``; see
+:func:`instruction_of`),
 ``step(action) -> (obs, reward, done, info)`` with ``info["status"]`` holding ``step`` and
 ``step_limit``, and ``get_status()``.  ``sam3_client`` segments an image by words or by a pixel
-(RPent's ``Sam3Client`` interface).
+(:class:`.sam3_local.LocalSam3`).
 """
 
 from __future__ import annotations
@@ -49,11 +48,9 @@ class Cancelled(Exception):
 class _Primitives:
     """What the tools of :mod:`.robodojo_tools` are bound to."""
 
-    def __init__(self, env: Any, sam3_client: Any, colour_only: bool = True) -> None:
+    def __init__(self, env: Any, sam3_client: Any) -> None:
         self.env = env
         self.sam3_client = sam3_client
-        #: no depth image is read, even where the observation has one
-        self.colour_only = colour_only
         self._last_obs: dict[str, Any] | None = None
         self.cancelled = threading.Event()
 
@@ -68,6 +65,23 @@ def _png(image: Any) -> bytes:
     buffer = io.BytesIO()
     Image.fromarray(np.asarray(image)[..., :3].astype(np.uint8)).save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+def instruction_of(obs: dict[str, Any]) -> str:
+    """The task instruction of an observation: RoboDojo's official Detail Description.
+
+    The Agent Track allows one task-conditioned text, ``obs["extra_info"]["detailed_instruction"]``
+    (rule section 2), so that is read first and passed on verbatim.  An observation without it
+    (an older client, a test scene) falls back to its ``instruction`` / ``instructions``.
+    """
+
+    extra = obs.get("extra_info")
+    detailed = extra.get("detailed_instruction") if isinstance(extra, dict) else None
+    if isinstance(detailed, (list, tuple)) and all(isinstance(line, str) for line in detailed):
+        detailed = "\n".join(detailed)
+    if isinstance(detailed, str) and detailed.strip():
+        return detailed
+    return str(obs.get("instruction") or obs.get("instructions") or "")
 
 
 def _plain(value: Any) -> Any:
@@ -117,14 +131,13 @@ class Steps:
                 continue  # an observation without calibration: nothing to record
             cameras[name] = {
                 "shape": _plain(cam.get("shape")),
-                "has_depth": tools.depth_image(cam) is not None,
                 "intrinsic_matrix": _plain(cam.get("intrinsic_matrix")),
                 "extrinsic_matrix": _plain(pose),
             }
         self.records.append(
             {
                 "state": _plain(obs.get("state") or {}),
-                "instruction": str(obs.get("instruction") or obs.get("instructions") or ""),
+                "instruction": instruction_of(obs),
                 "truncated": bool(spent or status.get("over")),
                 "cameras": cameras,
             }
@@ -209,7 +222,7 @@ class Steps:
 def segment(
     primitives: Any, text_prompt: str, camera: str = "cam_head", min_score: float = 0.2
 ) -> dict[str, Any]:
-    """Segment an object by words in the current image of one camera (RPent's tool, as is)."""
+    """Segment an object by words in the current image of one camera."""
 
     obs = tools._obs(primitives)
     cam = (obs.get("vision") or {}).get(camera)
@@ -247,14 +260,9 @@ class NativeToolkit:
         sam3_client: Any,
         out_dir: Path,
         verdict: Callable[[], bool] | None = None,
-        colour_only: bool | None = None,
     ) -> None:
         obs = env.get_obs()
-        if colour_only is None:
-            # what the observation offers decides: depth where the client sends it
-            head = (obs.get("vision") or {}).get("cam_head") or {}
-            colour_only = tools.depth_image(head) is None
-        self._primitives = _Primitives(env, sam3_client, colour_only)
+        self._primitives = _Primitives(env, sam3_client)
         self.state = Steps(out_dir)
         self._verdict = verdict
         self._lock = threading.Lock()
@@ -381,10 +389,6 @@ class NativeBackend:
     @property
     def toolkit(self) -> NativeToolkit:
         return self._toolkit
-
-    @property
-    def colour_only(self) -> bool:
-        return bool(self._toolkit._primitives.colour_only)
 
     def execute_tool(self, name: str, input_dict: dict[str, Any]) -> Any:
         return self._toolkit.execute_tool(name, input_dict)

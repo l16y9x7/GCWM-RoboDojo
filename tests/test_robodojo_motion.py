@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -347,7 +346,7 @@ def test_grip_runs_a_full_stroke_and_reports_what_it_holds(sim):
         0.035 * math.sqrt(2), abs=0.0005
     )
     tools.grip(prims, "right", -1)
-    env.block["right"] = 0.03  # something thin: a coin, a key, a mug's handle
+    env.block["right"] = 0.03  # something thin
     thin = tools.grip(prims, "right", 1)
     assert thin["holding"] and thin["width_m"] == pytest.approx(0.0056, abs=0.0005)
     assert "error" in tools.grip(prims, "right", 0)
@@ -365,9 +364,26 @@ def test_home_lifts_first_then_brings_both_arms_back(sim):
     assert env.joints["right"] == pytest.approx([0.0] * 6, abs=tools.HOME_TOL_RAD)
 
 
-# -- perception ------------------------------------------------------------------
+# -- what an object's surface points come to (``object_geometry``) ------------------------
 
 TABLE_DEPTH = 1.0  # the camera is 1 m above the table, looking straight down
+
+
+def _points(cam, mask):
+    """World points of a mask's pixels through a synthetic scene's depth along the optical axis
+    (Isaac cameras look along -Z): the surface points ``object_geometry`` is given for an object
+    of that shape."""
+
+    rows, cols = np.nonzero(mask)
+    depth = np.asarray(cam["distance_to_image_plane"], dtype=np.float64)
+    k = np.asarray(cam["intrinsic_matrix"], dtype=np.float64)
+    t = np.asarray(cam["extrinsic_matrix"], dtype=np.float64)
+    d = depth[rows, cols]
+    ok = np.isfinite(d) & (d > 0)
+    r, c, d = rows[ok], cols[ok], d[ok]
+    fx, fy, cx, cy = k[0, 0], k[1, 1], k[0, 2], k[1, 2]
+    p = np.stack([(c - cx) / fx * d, -(r - cy) / fy * d, -d, np.ones_like(d)])
+    return (t @ p)[:3].T
 
 
 def _overhead(box_center, length, width, height, heading_deg):
@@ -395,35 +411,9 @@ def _overhead(box_center, length, width, height, heading_deg):
     return cam, mask
 
 
-class _Sam3:
-    def __init__(self, mask) -> None:
-        self.mask = mask
-        self.calls: list[tuple[str, float]] = []
-
-    def segment(self, color, *, text_prompt: str, min_score: float):
-        self.calls.append((text_prompt, min_score))
-        if "block" not in text_prompt:
-            return SimpleNamespace(found=False, mask=None, score=0.0)
-        return SimpleNamespace(found=True, mask=self.mask, score=0.91)
-
-
-def test_world_points_follow_rpents_back_projection():
-    cam, _mask = _overhead((0.1, -0.1), 0.1, 0.04, 0.05, 0.0)
-    pts, valid = tools.world_points(cam, np.array([120, 0]), np.array([160, 0]))
-    assert valid.all()
-    assert pts[0] == pytest.approx((0.1, -0.1, kin.TABLE_Z + 0.05))  # the centre of the box top
-    corner = (0 - 160) / 300.0 * TABLE_DEPTH, -(0 - 120) / 300.0 * TABLE_DEPTH
-    assert pts[1] == pytest.approx((0.1 + corner[0], -0.1 + corner[1], kin.TABLE_Z))
-
-
-def test_locate_measures_a_turned_block_from_its_mask_and_depth():
+def test_the_geometry_of_a_turned_block():
     cam, mask = _overhead((0.1, -0.1), 0.10, 0.04, 0.05, 30.0)
-    env = _SimArms()
-    env.vision = {"cam_head": cam}
-    sam3 = _Sam3(mask)
-    prims = _Primitives(env, sam3)
-    obj = tools.locate(prims, "the red block")
-    assert obj["found"] and obj["score"] == 0.91 and obj["area_px"] == int(mask.sum())
+    obj = tools.object_geometry(_points(cam, mask))
     assert obj["center_xyz"][:2] == pytest.approx((0.1, -0.1), abs=0.005)
     assert obj["top_z"] == pytest.approx(kin.TABLE_Z + 0.05, abs=0.002)
     assert obj["height_m"] == pytest.approx(0.05, abs=0.002)
@@ -432,16 +422,8 @@ def test_locate_measures_a_turned_block_from_its_mask_and_depth():
     assert obj["width_m"] == pytest.approx(0.04, abs=0.01)
     assert obj["long_axis_deg"] == pytest.approx(30, abs=2)
     assert obj["grasp_yaw"] == pytest.approx(-60, abs=2)  # the fingers close across it
-    assert env.actions == [] and sam3.calls == [("the red block", 0.2)]
-    assert tools.locate._readonly is True
-    missing = tools.locate(prims, "the green bottle")
-    assert missing == {"camera": "cam_head", "found": False, "text_prompt": "the green bottle"}
-    assert "error" in tools.locate(prims, "the red block", camera="cam_left_wrist")
-    assert "error" in tools.locate(_Primitives(env), "the red block")  # no SAM3 service
     flat, flat_mask = _overhead((0.1, -0.1), 0.10, 0.04, 0.001, 0.0)
-    env.vision = {"cam_head": flat}
-    thin = tools.locate(_Primitives(env, _Sam3(flat_mask)), "a paper block")
-    assert thin["found"] and "too few points above the table" in thin["geometry_error"]
+    assert tools.object_geometry(_points(flat, flat_mask)) is None  # too little above the table
 
 
 def _render(shapes, rows=480, cols=640, f=400.0):
@@ -449,8 +431,8 @@ def _render(shapes, rows=480, cols=640, f=400.0):
 
     The camera sits where RoboDojo's does (above the robot's edge of the table, looking down
     the table), so it sees an object's top and the sides that face it.  Returns the camera
-    dict ``locate`` reads (depth along the optical axis) and, per pixel, the index of the
-    shape it shows (-1: the table).
+    dict (depth along the optical axis) and, per pixel, the index of the shape it shows (-1:
+    the table).
     """
 
     pos, target = np.array([0.0, -0.41, 1.308]), np.array([0.0, 0.05, kin.TABLE_Z])
@@ -518,9 +500,7 @@ def _located(shapes, mask=None):
     cam, seen = _head_view(shapes)
     mask = seen if mask is None else mask
     assert mask.sum() > 200
-    env = _SimArms()
-    env.vision = {"cam_head": cam}
-    return tools.locate(_Primitives(env, _Sam3(mask)), "the block")
+    return tools.object_geometry(_points(cam, mask))
 
 
 @pytest.mark.parametrize(
@@ -534,7 +514,7 @@ def _located(shapes, mask=None):
         (-0.2, 0.05, -35.0),
     ],
 )
-def test_locate_finds_the_faces_of_a_cube_the_head_camera_sees_from_the_side(x, y, yaw):
+def test_the_geometry_has_the_faces_of_a_cube_the_head_camera_sees_from_the_side(x, y, yaw):
     # Off the camera's axis two side faces are in view.  Their pixels all fall on two edges of
     # the footprint, and the principal axis of the pixels is then the cube's diagonal: in
     # RoboDojo the blocks of stack_blocks, all square to the table, came back with a
@@ -548,7 +528,7 @@ def test_locate_finds_the_faces_of_a_cube_the_head_camera_sees_from_the_side(x, 
     assert obj["top_z"] == pytest.approx(kin.TABLE_Z + 0.035, abs=0.002)
 
 
-def test_locate_measures_a_long_box_the_head_camera_sees_from_the_side():
+def test_the_geometry_of_a_long_box_the_head_camera_sees_from_the_side():
     obj = _located([{"center": (0.25, -0.1), "size": (0.10, 0.04, 0.05), "yaw": 30.0}])
     assert obj["long_axis_deg"] == pytest.approx(30, abs=2)
     assert obj["grasp_yaw"] == pytest.approx(-60, abs=2)
@@ -557,8 +537,8 @@ def test_locate_measures_a_long_box_the_head_camera_sees_from_the_side():
     assert obj["center_xyz"][:2] == pytest.approx((0.25, -0.1), abs=0.003)
 
 
-def test_locate_completes_the_far_side_of_a_round_object():
-    # A bottle: the camera sees the near half of the body and shoulder and all of the narrow
+def test_the_geometry_completes_the_far_side_of_a_round_object():
+    # A necked cylinder: the camera sees the near half of the body and shoulder and all of the narrow
     # top, so the visible points end at the neck.  Each slice of the body is an arc, which is
     # the circle.
     centre = (0.3, 0.0)
@@ -574,7 +554,7 @@ def test_locate_completes_the_far_side_of_a_round_object():
     assert obj["top_z"] == pytest.approx(kin.TABLE_Z + 0.20, abs=0.003)
     # the visible points by themselves stop at the neck: 1 cm towards the camera, 2 cm short
     cam, mask = _head_view(bottle)
-    seen, _ = tools.world_points(cam, *np.nonzero(mask))
+    seen = _points(cam, mask)
     _heading, _length, width, mid = tools._footprint(seen[:, :2])
     assert np.linalg.norm(mid - centre) > 0.008 and width < 0.052
 
@@ -601,15 +581,15 @@ def test_circles_that_do_not_share_an_axis_complete_nothing():
     # one slice off the axis is a misfit: it is dropped, the others still count
     one_off = _arcs([(0.3, 0.0)] * 5 + [(0.33, 0.0)])
     assert len(tools._far_side(one_off)) == 5 * 90
-    # A body that is round, but not about one upright axis: a piggy bank standing on its feet
-    # gave four circles of which two were alike, and they put 2 cm on its width.
+    # A body that is round, but not about one upright axis: only some of its slices fit
+    # circles that share an axis, and fitting those would overstate its width.
     lying = _arcs([(0.30, 0.0), (0.30, 0.0), (0.315, 0.0), (0.33, 0.0), (0.345, 0.0), (0.36, 0.0)])
     assert len(tools._far_side(lying)) == 0
     geo = tools.object_geometry(lying)
     assert geo["width_m"] == pytest.approx(0.033, abs=0.004)  # the near arcs, nothing behind them
 
 
-def test_locate_adds_nothing_behind_a_flat_sided_object():
+def test_the_geometry_adds_nothing_behind_a_flat_sided_object():
     # a plate standing across the view, and a box with a corner towards the camera: neither
     # slice is an arc, and the top covers the footprint
     plate = _located([{"center": (0.0, 0.05), "size": (0.20, 0.02, 0.15)}])
@@ -621,7 +601,7 @@ def test_locate_adds_nothing_behind_a_flat_sided_object():
     assert box["center_xyz"][:2] == pytest.approx((0.2, 0.0), abs=0.003)
 
 
-def test_locate_lays_a_t_along_its_bar_not_along_its_smallest_rectangle():
+def test_the_geometry_lays_a_t_along_its_bar_not_along_its_smallest_rectangle():
     # A T is clearly longer one way: its principal axes are its bar and its stem.  The
     # smallest rectangle around a trimmed T sits askew (12 degrees on RoboDojo's push-T block).
     yaw, at = 30.0, np.array([0.1, -0.15])
@@ -636,7 +616,7 @@ def test_locate_lays_a_t_along_its_bar_not_along_its_smallest_rectangle():
     assert obj["width_m"] == pytest.approx(0.056, abs=0.004)
 
 
-def test_locate_leaves_out_what_the_object_stands_on():
+def test_the_geometry_leaves_out_what_the_object_stands_on():
     # the mask of a cube on a low pad takes a strip of the pad behind it along
     centre = (-0.115, -0.2)
     pad = {"center": centre, "size": (0.08, 0.08, 0.0055)}
@@ -644,7 +624,7 @@ def test_locate_leaves_out_what_the_object_stands_on():
     cam, owner = _render([pad, cube])
     mask = owner == 1
     rows, cols = np.nonzero(owner == 0)
-    on_pad, _ = tools.world_points(cam, rows, cols)
+    on_pad = _points(cam, owner == 0)
     strip = (np.abs(on_pad[:, 0] - centre[0]) < 0.02) & (on_pad[:, 1] > centre[1] + 0.0175)
     strip &= on_pad[:, 1] < centre[1] + 0.032
     assert strip.sum() > 20
@@ -666,58 +646,3 @@ def test_a_footprint_of_a_few_points_in_a_row_is_still_a_rectangle():
     assert geo["length_m"] == pytest.approx(0.046, abs=0.004) and geo["width_m"] <= 0.004
 
 
-def test_points_on_the_arms_are_told_apart_from_the_scene():
-    q = [0.0] * 6
-    state = {f"{a}_arm_joint_state": q for a in kin.ARMS}
-    fr = kin.frames("right", q)
-    on_arm = np.array([fr[2][:3, 3], fr[-1][:3, 3], kin.tcp(kin.fk("right", q))])
-    table = np.array([[0.1, -0.1, kin.TABLE_Z + 0.03], [0.0, 0.1, kin.TABLE_Z + 0.05]])
-    hit = tools._on_robot(state, np.vstack([on_arm, table]))
-    assert hit.tolist() == [True, True, True, False, False]
-
-
-def test_points_on_the_open_fingers_and_their_rail_are_the_robots_too():
-    # The fingers stand 4.5 to 7 cm off the gripper's axis when open, further than the arm's
-    # links are wide: a mug under the homed gripper came back 4 cm off with them in its mask.
-    q = [0.0] * 6
-    hand = kin.frames("right", q)[-1]
-
-    def at(forward, side, up=0.0):
-        return hand[:3, 3] + hand[:3, 0] * forward + hand[:3, 1] * side + hand[:3, 2] * up
-
-    points = np.array(
-        [
-            at(0.12, 0.058),  # the middle of one open finger
-            at(0.15, -0.050, 0.02),  # the other, near its tip
-            at(0.075, 0.085),  # the end of the rail
-            at(kin.TIP_OFFSET + 0.08, 0.0),  # what the gripper points at, 8 cm ahead
-            at(0.12, 0.0, -0.09),  # the table under the open gripper
-        ]
-    )
-    state = {f"{a}_arm_joint_state": q for a in kin.ARMS}
-    opened = tools._on_robot(state | {f"{a}_ee_joint_state": [1.0] for a in kin.ARMS}, points)
-    assert opened.tolist() == [True, True, True, False, False]
-    closed = tools._on_robot(state | {f"{a}_ee_joint_state": [0.0] for a in kin.ARMS}, points)
-    assert closed.tolist() == [False, False, True, False, False]  # the fingers are at the axis
-
-
-def test_register_adds_the_four_tools_and_only_locate_is_read_only(sim):
-    env, prims, _start = sim
-    env.joints["left"] = [0.0, 0.3, 0.0, 0.0, 0.0, 0.0]  # where boot left it
-    added: dict[str, Any] = {}
-
-    class _Toolkit:
-        _primitives = prims
-
-        def add_tool(self, name, spec, handler):
-            added[name] = (spec, handler)
-
-    tools.register(_Toolkit())
-    assert set(added) == {"move_pose", "grip", "locate", "home"}
-    for name, (spec, handler) in added.items():
-        assert spec is tools.SPECS[name] and spec["name"] == name
-        # RPent's own test of read-only handlers: unwrap partials, read ``_readonly``
-        assert getattr(handler.func, "_readonly", False) is (name == "locate")
-    env.joints["left"] = [0.5, 0.5, 0.0, 0.0, 0.0, 0.0]
-    assert added["home"][1](arm="left")["reached"]
-    assert env.joints["left"] == pytest.approx([0.0, 0.3, 0.0, 0.0, 0.0, 0.0], abs=0.01)

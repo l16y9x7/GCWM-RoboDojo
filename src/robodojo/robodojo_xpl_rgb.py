@@ -6,20 +6,17 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 
-"""RoboDojo under its own evaluation client as that client is configured: no depth image.
+"""The RoboDojo robot under RoboDojo's own evaluation client: colour images, no depth image.
 
-``robodojo.robodojo_xpl`` is the RoboDojo robot under RoboDojo's own evaluation client with
-the depth image and the camera matrices its simulator can give.  Those are switched off in
-the client's configuration (``env_cfg/arx_x5.yml``: ``approximate_depth``, ``depth``,
-``intrinsic_matrix``, ``extrinsic_matrix``; RoboDojo PR 2), a policy cannot switch them on
-from its side, and no adapter on the leaderboard reads them.  The robot here is the same
-robot with perception that needs no more than that default: ``locate`` measures an object
-from its masks in the cameras that see it (:mod:`robodojo.hosts.robodojo_sight`),
-``back_project`` answers for the object under a pixel, ``camera_meta`` is worked out from the
-robot's state.  Motion and the gripper are unchanged.
+RoboDojo's evaluation client sends three colour images and the robot's state; the depth
+image and the camera matrices its simulator can give are switched off in the client's
+configuration (``env_cfg/arx_x5.yml``), and a policy cannot switch them on from its side.
+The robot here works from that default: ``locate`` measures an object from its masks in the
+cameras that see it (:mod:`robodojo.hosts.robodojo_sight`), ``back_project`` answers for the
+object under a pixel, ``camera_meta`` is worked out from the robot's state.  Motion and the
+gripper are :class:`robodojo.robodojo.RobodojoRobot`'s.
 
-The host is :mod:`robodojo.hosts.xpolicylab_robodojo_rgb`.  There is no VLA in that host:
-run the robot with ``--primitives no-vla``.
+The host is :mod:`robodojo.hosts.xpolicylab_robodojo`.
 """
 
 from __future__ import annotations
@@ -34,7 +31,6 @@ from .robodojo import (
     Home,
     Move,
     ObjectPose,
-    Pick,
     RobodojoRobot,
     Segment,
     State,
@@ -128,7 +124,7 @@ class RobodojoOfficialColourRobot(RobodojoRobot):
     ``Gripper.opening``) are openings: 1.0 = open, 0.0 = closed on nothing.
 
     Every native action (one step of ``move_to``, ``set_gripper`` or
-    ``home``, one VLA action) counts against the episode's
+    ``home``) counts against the episode's
     native-action budget; when it is spent the state reports ``truncated``
     and motion calls raise ``EpisodeFinished``.  Motion calls block until the
     primitive finishes and return a typed result; nothing is queued.
@@ -141,9 +137,6 @@ class RobodojoOfficialColourRobot(RobodojoRobot):
     the cameras that see it: it takes two of them to measure a height.
     ``segment`` / ``back_project`` give a mask centroid and the world point at
     one pixel.  Object poses are never given.
-
-    The frozen Pi0.5 VLA (``pi0_pick``) is a learned dual-arm policy trained on
-    demonstrations of this benchmark's tasks.
     """
 
     NAME: ClassVar[str] = "robodojo_xpl_rgb"
@@ -154,7 +147,6 @@ class RobodojoOfficialColourRobot(RobodojoRobot):
         Gripper,
         Home,
         ObjectSight,
-        Pick,
         Segment,
         SeenPoint,
     )
@@ -207,7 +199,7 @@ class RobodojoOfficialColourRobot(RobodojoRobot):
             object from this camera and the others that see it.
             ``"table"``: ``xyz`` is on the table top; a pixel that shows
             something too flat or too far to measure also answers so.  A thin
-            part in mid-air (a peg, a handle, a cable) is not measured
+            part in mid-air is not measured
             reliably: reason from the image and from ``locate`` of the whole
             object instead.
         Raises:
@@ -247,14 +239,14 @@ class RobodojoOfficialColourRobot(RobodojoRobot):
         Returns:
             ObjectSight.  For a top grasp: ``move_to([x, y, top_z + 0.09],
             pitch=90)`` above it, ``locate`` it again from there (the wrist
-            camera then looks down on it and the reading is good to 1-2 mm),
-            turn to ``yaw=grasp_yaw`` and go down to the height to hold it
-            at.  With ``views >= 2`` and no ``note`` a block, a can, a bowl
-            or the body of a bottle is measured to 1-3 mm; a ``note`` that
+            camera then looks down on it and the reading is good to a few
+            mm), turn to ``yaw=grasp_yaw`` and go down to the height to hold
+            it at.  With ``views >= 2`` and no ``note`` a solid upright
+            object is measured to within a few mm; a ``note`` that
             the cameras agree only roughly leaves the height uncertain.  With
             ``views == 1`` the height is a guess, the tallest upright shape
-            that fits the one image: close for a box or a can, wrong for a
-            bowl, a cup or anything wider above than below, and for a tall
+            that fits the one image: close for a solid, straight-sided
+            object, wrong for a hollow one or anything wider above than below, and for a tall
             thing that tapers; ``center_xyz`` is then off, along the line
             away from the robot, by about half of what the height is wrong
             by.  An object once measured with ``views >= 2`` keeps that height
@@ -304,16 +296,13 @@ class RobodojoOfficialColourRobot(RobodojoRobot):
 ADAPTER = RobotAdapter(
     name="robodojo_xpl_rgb",
     robot_cls=RobodojoOfficialColourRobot,
-    host="robodojo.hosts.xpolicylab_robodojo_rgb",
+    host="robodojo.hosts.xpolicylab_robodojo",
     knowledge="robodojo_xpl_rgb",
     blurb="a dual-arm ARX-X5 robot in the RoboDojo benchmark",
-    guides_subdir="",
-    guide_names=(),
     show_examples=(
         "`robo.show('cam_head')`, `robo.show('cam_left_wrist')` or `robo.show('cam_right_wrist')`"
     ),
-    services="a frozen Pi0.5 VLA and a SAM3 segmentation service",
-    services_novla="a SAM3 segmentation service",
+    services="a SAM3 segmentation service",
 )
 
 
