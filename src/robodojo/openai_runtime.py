@@ -6,21 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 
-"""A plain OpenAI chat-completions agent loop for the code arms (``--runtime openai``).
+"""The agent loop: an OpenAI chat-completions conversation that calls the robot's tools.
 
-The Codex and Claude runtimes hand the agent loop to a coding-agent product
-with its own system prompt, tools and transcript format.  This runtime is the
-third option: the loop lives here, talks to *any* OpenAI-compatible
-``/v1/chat/completions`` endpoint (a gateway, a local SGLang / vLLM server, a
-training framework's rollout engine) with function calling, and executes the
-arm's tools in-process through :class:`robodojo.arms.ArmToolkit` (no MCP
-server, no subprocess).  It is what a small open model, a distillation
-teacher and an RL rollout all share.
+The loop talks to *any* OpenAI-compatible ``/v1/chat/completions`` endpoint (a gateway, a
+local SGLang / vLLM server) with function calling, and executes the tools in-process through
+:class:`robodojo.arms.ArmToolkit` (no subprocess).
 
 Protocol (one episode):
 
 1. The first user message carries the full prompt text and the task card
-   images as ``image_url`` data URIs (same content Codex / Claude get).
+   images as ``image_url`` data URIs.
 2. Each assistant reply may carry ``tool_calls``; they are executed in order
    through ``ArmToolkit.execute_tool`` and answered with one ``tool`` message
    each.  Images returned by a tool (``on-motion`` or ``robo.show()``) cannot
@@ -33,8 +28,8 @@ Protocol (one episode):
 
 Everything the model saw and said is written to ``messages.json`` (images
 replaced by references to PNG files under ``images/``), every request to
-``openai_events.jsonl``, and the usual ``generation`` record (Codex's token
-conventions: ``input_tokens`` includes cached tokens) goes into
+``openai_events.jsonl``, and the ``generation`` record (``input_tokens`` includes cached
+tokens) goes into
 ``result.json`` by :mod:`robodojo.play`.
 """
 
@@ -57,8 +52,8 @@ from .arms import ArmResult, ArmToolkit
 DEFAULT_RETRIES = int(os.environ.get("ROBODOJO_OPENAI_RETRIES", "10"))
 #: A rate limit (HTTP 429) is waited out, not counted against ``retries``: backoff doubling from
 #: 5 s to RATE_LIMIT_MAX_WAIT_S, with jitter, for as long as the episode's own time allows.  With
-#: ~40 episodes on one gateway key, 39 of 162 episodes ended at their first request after ten
-#: 429s two to twenty seconds apart.
+#: many episodes sharing one gateway key, counting 429s against ``retries`` ended episodes at
+#: their first request.
 RATE_LIMIT_MAX_WAIT_S = float(os.environ.get("ROBODOJO_RATE_LIMIT_MAX_WAIT_S", "120"))
 #: Seconds one chat request may take (a 40-call episode on a slow model needs it).
 DEFAULT_TIMEOUT_S = float(os.environ.get("ROBODOJO_OPENAI_TIMEOUT_S", "900"))
@@ -112,7 +107,7 @@ def image_part(data: bytes) -> dict[str, Any]:
 
 
 def openai_tools(spec: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert the arm's MCP-style tool specs (``input_schema``) to OpenAI ``tools``."""
+    """Convert the toolkit's tool specs (``input_schema``) to OpenAI ``tools``."""
 
     return [
         {
@@ -253,7 +248,7 @@ def _usage_fields(usage: dict[str, Any] | None) -> dict[str, int]:
 
 
 def _tool_result_text(result: ArmResult) -> str:
-    """The text block of a tool result, exactly what the MCP server would send."""
+    """The text block of a tool result."""
 
     return result.content_blocks[0]["text"]
 
@@ -268,9 +263,8 @@ def _execute_with_deadline(
     """Run one tool call, stopping the episode if it is still running at the deadline.
 
     A cell can loop over primitives for minutes; this loop *is* the host thread, so without a
-    timer the wall-clock budget would only be noticed after the cell returned (the Codex and
-    Claude runtimes stop the robot from the host while the agent process keeps running).  The
-    timer fires ``on_timeout``, which makes the next primitive raise ``EpisodeFinished``.
+    timer the wall-clock budget would only be noticed after the cell returned.  The timer fires
+    ``on_timeout``, which makes the next primitive raise ``EpisodeFinished``.
     """
 
     if on_timeout is None:
@@ -314,7 +308,6 @@ def run_openai_agent(
     max_turns: int | None,
     budget_s: float,
     out_dir: str | Path,
-    arm: str = "cells",
     temperature: float | None = None,
     max_tokens: int | None = 4096,
     extra_body: dict[str, Any] | None = None,
@@ -334,8 +327,8 @@ def run_openai_agent(
     ``status`` is ``completed`` (the agent finished, stopped calling tools, or
     spent its decision budget), ``timeout`` (``budget_s`` expired:
     ``on_timeout`` is called first) or ``error`` (the provider failed after
-    ``retries``); ``returncode`` mirrors the Claude runtime: 0 clean, 2 after
-    a provider error, ``None`` on timeout.  ``extra_body`` is merged into
+    ``retries``); ``returncode`` is 0 clean, 2 after a provider error, ``None`` on
+    timeout.  ``extra_body`` is merged into
     every request (``reasoning_effort``, ``chat_template_kwargs`` ...).
     ``tool_choice`` is OpenAI's: ``auto`` lets the model answer in text,
     ``required`` makes every reply a tool call (``python`` or ``finish``),
@@ -363,7 +356,7 @@ def run_openai_agent(
         url += "/chat/completions"
     post = transport or httpx_transport(api_key)
     # The deadline can be noticed by the tool timer and again by the loop; the robot is stopped
-    # once either way, so make the hook itself fire once (the Claude runtime's contract).
+    # once either way, so make the hook itself fire once.
     timeout_fired = False
 
     def stop_once() -> None:
@@ -555,7 +548,7 @@ def run_openai_agent(
             usage = _usage_fields(response.get("usage"))
             for key in totals:
                 totals[key] += usage[key]
-            request_profile.append(totals["prompt"])  # cumulative, as the Claude runtime reports it
+            request_profile.append(totals["prompt"])  # cumulative
             choice = response["choices"][0]
             finish_reasons.append(choice.get("finish_reason"))
             message = choice.get("message") or {}

@@ -57,7 +57,7 @@ else
     pip_install "robodojo @ ${ROBODOJO_SOURCE}"
 fi
 # What the episode driver imports (the package declares no dependencies of its own).
-pip_install "numpy" "pillow" "pyyaml>=6" "httpx>=0.27" "mcp>=1.8,<2" "uvicorn"
+pip_install "numpy" "pillow" "pyyaml>=6" "httpx>=0.27"
 # SAM3, and what its image model imports without declaring it.
 pip_install "sam3 @ ${SAM3_SOURCE}" "einops" "pycocotools" "psutil"
 

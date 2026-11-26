@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "robodojo"
 version = "0.1.0"
-description = "Code-as-policy for RoboDojo, derived from PyRUA-Lean"
+description = "Code-as-policy agent for the RoboDojo Agent Track, derived from PyRUA-Lean"
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -28,8 +28,6 @@ dev = [
     "numpy",
     "pillow",
     "pyyaml>=6",
-    "mcp>=1.8,<2",
-    "uvicorn",
     "httpx",
 ]
 
@@ -40,7 +38,7 @@ robodojo = "robodojo.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-robodojo = ["knowledge/*.md", "codex-catalog-gpt-6-astra-fallback.json"]
+robodojo = ["knowledge/*.md"]
 
 [tool.pytest.ini_options]
 addopts = ["--import-mode=importlib"]
