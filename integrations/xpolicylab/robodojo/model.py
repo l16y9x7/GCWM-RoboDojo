@@ -8,7 +8,9 @@ joint actions.  XPolicyLab's two calls reach it through a bridge
 thinking, or with nothing once it has finished.
 
 One episode at a time: ``reset`` ends whatever is running and the first observation after it
-starts the next (the observation names the task and the layout, see ``deploy.py``).
+starts the next.  The policy is not told the task's name, the eval seed or the layout:
+``deploy.py`` does not send them, and the task's name and eval seed the server was started
+with only name the episode's records.
 """
 
 from __future__ import annotations
@@ -149,8 +151,13 @@ class Model(ModelTemplate):
     def _play(self, bridge: Bridge, info: dict[str, Any], robot: str) -> None:
         from robodojo.play import play_episode
 
-        task = str(info.get("task_name") or self.cfg.get("task_name"))
-        layout = int(info.get("layout", 0))
+        # The task's name and the eval seed are the ones the policy server was started with
+        # (deploy.yml); they name the episode's records and reach no prompt.  The layout is
+        # the evaluator's alone: the policy side records it as -1, and RoboDojo's own result
+        # (eval_result/) holds it.
+        task = str(self.cfg.get("task_name") or "unknown")
+        eval_seed = self.cfg.get("seed")
+        layout = -1
         gpu = self.cfg.get("gpu_id")
         cell = host.Cell(
             suite=str(self.cfg.get("env_cfg_type") or "arx_x5"),
@@ -158,7 +165,8 @@ class Model(ModelTemplate):
             seed=layout,
             cuda_device=int(gpu) if gpu not in (None, "") else None,
         )
-        out = self.result_dir / f"{task}_l{layout}_s{info.get('eval_seed', 0)}-{int(time.time())}"
+        seed_tag = "" if eval_seed in (None, "") else f"_s{eval_seed}"
+        out = self.result_dir / f"{task}{seed_tag}-{int(time.time())}"
         out.mkdir(parents=True, exist_ok=True)
         runtime = {
             "batch_id": os.environ.get("BATCH_ID", ""),
@@ -188,11 +196,8 @@ class Model(ModelTemplate):
             result = play_episode(
                 cell,
                 out,
-                arm="cells",
                 model=str(self.cfg.get("model") or os.environ["ROBODOJO_MODEL"]),
                 robot=robot,
-                runtime=str(self.cfg.get("runtime") or "openai"),
-                primitives=str(self.cfg.get("primitives") or "no-vla"),
                 images=str(self.cfg.get("images") or "on-motion"),
                 feedback=str(self.cfg.get("feedback") or "pure"),
                 max_turns=int(self.cfg.get("max_turns") or 100),
@@ -206,7 +211,7 @@ class Model(ModelTemplate):
                 {k: result.get(k) for k in ("status", "environment_success", "task", "robot")}
             )
             print(
-                f"[Model] {task} layout {layout}: status {result.get('status')}, "
+                f"[Model] {task}: status {result.get('status')}, "
                 f"success {result.get('environment_success')}  ({out})",
                 flush=True,
             )

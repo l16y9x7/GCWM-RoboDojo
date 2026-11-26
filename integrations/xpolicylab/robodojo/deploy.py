@@ -9,12 +9,12 @@ with three differences, each because of that:
 * an empty answer means the program has finished: the episode ends there and RoboDojo judges
   the scene as it stands;
 * every observation carries the episode's step count and limit, which the program needs to
-  budget its motions, and whether this client's pictures run an observation behind its state
-  (``additional_info["robodojo"]``); the benchmark's verdict is reported to the policy
-  server once the episode is over (the protocol's ``trial_end``).
+  budget its motions (``additional_info["robodojo"]``); the benchmark's verdict is reported
+  to the policy server once the episode is over (the protocol's ``trial_end``).
 
 Nothing else is read from the environment: the observation is the one RoboDojo's client
-builds, the actions are joint targets.
+builds, the actions are joint targets.  The task's name, the eval seed and the layout are not
+sent to the policy server.
 """
 
 from __future__ import annotations
@@ -22,25 +22,8 @@ from __future__ import annotations
 from typing import Any
 
 
-def _pictures_behind() -> int:
-    """How many observations the client's pictures run behind its state.
-
-    RoboDojo's client used to hand out the frame rendered before the current physics state:
-    an observation's pictures showed the robot one observation earlier than its state did
-    (RoboDojo issue 38).  Since ``env/camera_manager/capture/render_sync.py`` (commit 6e3190f)
-    it renders the current state before it captures.  The policy pairs a picture with the
-    state it shows, so it has to know which client this is.
-    """
-
-    try:
-        from env.camera_manager.capture import render_sync  # noqa: F401 - RoboDojo's own
-    except Exception:  # noqa: BLE001 - an older client, or not a RoboDojo client at all
-        return 1
-    return 0
-
-
 def _status(task_env: Any, env_idx: int = 0) -> dict[str, Any]:
-    info: dict[str, Any] = {"pictures_behind": _pictures_behind()}
+    info: dict[str, Any] = {}
     # RoboDojo's environment counts per environment; XPolicyLab's debug environment has one
     # counter and its own names
     taken = getattr(task_env, "take_action_cnt", None)
@@ -55,15 +38,8 @@ def _status(task_env: Any, env_idx: int = 0) -> dict[str, Any]:
             break
         except (TypeError, ValueError, AttributeError):
             continue
-    for name in ("task_name", "eval_seed"):
-        value = getattr(task_env, name, None)
-        if value is not None:
-            info[name] = value
-    seeds = getattr(task_env, "env_seeds", None)
-    try:
-        info["layout"] = int(seeds[env_idx])
-    except (TypeError, IndexError, ValueError):
-        pass
+    # The task's name, the eval seed and the layout are the evaluator's: none of them is sent
+    # to the policy (RoboDojo Agent Track rule, sections 1, 2 and 6)
     return info
 
 
@@ -77,7 +53,12 @@ def _waiting(actions: Any) -> bool:
 
 
 def _judge_as_it_stands(task_env: Any) -> None:
-    """End an episode the program has finished: RoboDojo runs its final checks now."""
+    """Mark an episode the program left unfinished as failed; RoboDojo keeps its progress score.
+
+    A completed task has already ended the episode (RoboDojo checks after every
+    action).  RoboDojo starts each episode with ``success`` set and counts an
+    episode that returns with it still set as a success, so it must be cleared.
+    """
 
     if task_env.is_episode_end() or not hasattr(task_env, "success"):
         return  # over already, or an environment with nothing to judge (the debug one)
