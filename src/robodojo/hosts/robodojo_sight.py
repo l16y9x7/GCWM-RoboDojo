@@ -23,14 +23,14 @@ simulator once).  So every pixel is a known ray, and an object that stands on a 
     that are in the shadow and whose column up to ``h`` stays in the mask; for a box or a can
     of that height these cells are its footprint, exactly.  Something that ``hangs`` from that
     height: every cell whose point at ``h`` is in the mask, with as much below it as the mask
-    allows, standing on the table or not; that is a bowl from its rim down, or anything wider
+    allows, standing on the table or not; that is a hollow object from its rim down, or anything wider
     above than below.
 *   A SECOND camera that sees the object from elsewhere settles the height: the solid a reading
     describes is projected into it and compared with the object's mask there.  The reading and
     height that match best are taken (:func:`measure`); the hanging one only where it matches
     clearly better, since whatever stands on its own footprint is a prism.  With only one mask
     the height is the tallest prism that still accounts for the whole mask, which is right for
-    boxes and cans and a guess for a bowl.
+    straight-sided objects and a guess for a hollow one.
 
 :func:`measure` answers with the world point each pixel of the mask shows on that solid: what a
 depth image would have given for an object of that shape.
@@ -75,7 +75,7 @@ OWN_FINGER_INNER_M = 0.0445
 OWN_FINGER_THICK_M = 0.012
 OWN_FINGER_X_M = (0.10, 0.165)
 OWN_FINGER_Z_M = (-0.02, 0.011)
-#: The robot's outline in an image is drawn from the capsules ``locate`` drops depth points by,
+#: The robot's outline in an image is drawn from its links', rails' and fingers' capsules,
 #: shrunk to this share: those are wide on purpose (a point near the arm is the arm's), while a
 #: pixel is unknown only where the arm really is in front.
 ROBOT_OUTLINE = 0.75
@@ -286,7 +286,7 @@ def robot_pixels(
 ) -> np.ndarray:
     """The pixels of a view that may show the robot itself, from the state alone.
 
-    Each link, gripper rail and finger is a capsule (the ones ``locate`` drops depth points by),
+    Each link, gripper rail and finger is a capsule (sized in :mod:`.robodojo_tools`),
     drawn as discs along its axis.  Generous on purpose: these pixels are *unknown*, not empty.
     ``own`` names the arm whose wrist camera this view is: that arm is behind the camera except
     for its two fingers, which the camera sees from between them, as two boxes.  Without
@@ -602,8 +602,8 @@ class _Levels:
 
     def prism(self, level: int, rise: np.ndarray | None = None) -> _Solid:
         """What stands on the plane, no taller than ``level``: over each cell of the shadow a
-        column as high as the mask allows it there.  For a box or a can that is the box or the
-        can; a bottle keeps its shoulders and a mug its handle, each at its own height.
+        column as high as the mask allows it there.  For a straight-sided object that is the
+        object itself; a shoulder or a protruding part keeps its own height.
         ``rise`` replaces the head mask's word on how high each column may go (the least that
         every view allows)."""
 
@@ -763,7 +763,8 @@ def _taller(
 ) -> int:
     """The level an object's top is at, given the level of its body.
 
-    A prism is judged at one height, and for a bottle the best one is its shoulder: the neck
+    A prism is judged at one height, and for an object with a narrow neck the best one is its
+    shoulder: the neck
     above it is thin.  The columns every view allows go higher there.  They also go higher
     along the edge of a box that faces the cameras, where nothing shows whether the box ends:
     so the top is raised only as far as it lets the solid account for more of the other views'
@@ -1022,8 +1023,8 @@ def measure(
         body = levels.block(level)
         if trusted and _seen(trusted, body) < HULL_BELOW:
             # the plain prism leaves part of what the other views show unexplained: take the
-            # columns every view allows instead (a bottle's shoulders and a mug's handle stand
-            # at their own height beside what reaches the top), and look for a top above
+            # columns every view allows instead (shoulders and protruding parts stand at their
+            # own height beside what reaches the top), and look for a top above
             carved = rise
             for sight, _px in trusted:
                 carved = np.minimum(carved, levels.rise_in(sight, levels.count - 1))

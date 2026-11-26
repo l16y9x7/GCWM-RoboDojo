@@ -8,20 +8,14 @@
 
 """Kinematics of RoboDojo's two ARX-X5 arms, computed in the host: full pose, no RPC.
 
-RPent's RoboDojo environment exposes one IK call, ``solve_ik_position``: a target position, a
-few candidate orientations (the current one, the starting one, 25 degree tilts of the current
-one about world x and y), the one needing the least joint motion.  Nothing can ask for an
-orientation, and the tilts accumulate: an arm sent away and back to its starting position by
-``move_to`` came back rotated by 47 to 52 degrees.  The simulator's own full-pose action path
-(``<arm>_ee_pose``) swings the arm when its IK diverges.
-
-So the host solves IK itself.  The chain is the benchmark's URDF (``Assets/Robots/x5/X5A.urdf``,
-joints ``joint1`` .. ``joint6``, ending at ``link6``), and each arm's base pose was fitted to
-113 (joint angles, reported end-effector pose) pairs recorded in four episodes: the
+The simulator's own full-pose action path (``<arm>_ee_pose``) swings the arm when its IK
+diverges, so the host solves IK itself.  The chain is the benchmark's URDF
+(``Assets/Robots/x5/X5A.urdf``, joints ``joint1`` .. ``joint6``, ending at ``link6``), and each
+arm's base pose was fitted to (joint angles, reported end-effector pose) pairs recorded in a
+self-built simulation test scene: the
 reported ``<arm>_ee_pose`` is exactly the pose of ``link6`` in the world (0.00 mm and 0.000
 degrees of residual), with the bases on the table edge at x = -0.30 / +0.30, y = -0.45,
-z = 0.765, turned 90 degrees about z.  The solution is commanded as joint angles, the action
-path RPent's ``move_to`` uses for its own IK solutions.
+z = 0.765, turned 90 degrees about z.  The solution is commanded as joint angles.
 
 Frames.  ``link6``'s x axis is the gripper's pointing direction (wrist to fingertips) and the
 two fingers close along its y axis.  At the start both grippers point away from the robot
