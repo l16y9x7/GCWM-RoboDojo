@@ -73,7 +73,7 @@ The policy reads what RoboDojo's client sends as it is configured (`env_cfg/arx_
 
 Where an object is, is measured from its masks in the cameras that see it (SAM3): the head camera's mask bounds the object's footprint on the table, a wrist camera that sees the same object settles its height. That is good to a few millimetres for things up to about 6 cm tall, worse for tall things only one camera sees, and it cannot measure what does not stand on the table (an object in the gripper, on another object, in a rack).
 
-Each episode also records the ordered camera observations received while a state-changing primitive is running under `steps/NNNN/sim_NNN/`, with the primitive's final observation under `steps/NNNN/final/`. `steps/0000/` contains the initial observation. Each step's `frames.json` indexes its received frames by Bridge sequence and source environment step; frame directories are numbered in receive order. Agent code can read a primitive's frames using `robo.sim_frames(step=NNNN)` and process the returned RGB NumPy arrays. See [simulation image frames](../../../doc/sim-image-frames.md) for the API and examples.
+Each episode also records the ordered camera observations received while a state-changing primitive is running under `steps/NNNN/sim_NNN/`, with the primitive's final observation under `steps/NNNN/final/`. `steps/0000/` contains the initial observation. Each step's `frames.json` indexes its received frames by Bridge sequence and source environment step; frame directories are numbered in receive order. Agent code can read a primitive's frames using `robo.sim_frames(step=NNNN)` and process the returned RGB NumPy arrays.
 
 ## Notes
 

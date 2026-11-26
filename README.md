@@ -51,5 +51,3 @@ python -m robodojo prompt
 ## 协议名
 
 观察和动作的协议键是 `robodojo`（`additional_info["robodojo"]`，以及 `get_action` 的 `wait`）。
-
-Agent 的动作闭环和图片上下文保留策略见 [`doc/agent-interaction.md`](doc/agent-interaction.md)。
