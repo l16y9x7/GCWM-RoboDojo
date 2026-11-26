@@ -6,13 +6,14 @@ robodojo is derived from PyRUA-Lean
 Contributors, licensed under the Apache License, Version 2.0 (see LICENSE).
 The RoboDojo evaluation path (the robot API, the XPolicyLab host, the motion
 and perception primitives, and integrations/xpolicylab/robodojo) was split
-out of that tree so it can be developed under this name. Copyright headers in
-the source files are kept.
+out of that tree and modified for RoboDojo's Agent Track: the other benchmarks'
+robots and hosts, the RPent backend, the depth-image robot, the program arm
+and the Codex and Claude runtimes were removed. Copyright headers in the
+source files are kept.
 
 This product builds on RPent (https://github.com/RLinf/RPent),
 Copyright 2026 The RPent Authors, licensed under the Apache License, Version 2.0.
 Parts kept from that line, via PyRUA-Lean, were modified:
-  - src/robodojo/mcp_server.py is adapted from RPent's HttpMcpServer;
   - src/robodojo/knowledge/*.md distil operating knowledge for a program author;
   - the robot class mirrors the tool schemas (tool names, argument names and defaults).
 

@@ -1,6 +1,6 @@
 # Simulation Image Frames for Agent Developers
 
-This note describes the GCWM Agent side of RoboDojo image capture. The integration subscribes to image observations as the Bridge receives them and archives each received image frame in order. The simulator client and the `Jasper/RoboDojo` checkout are not modified.
+This note describes the GCWM Agent side of RoboDojo image capture. The integration subscribes to image observations as the Bridge receives them and archives each received image frame in order. The simulator client and the RoboDojo checkout are not modified.
 
 ## Returned images
 
@@ -14,7 +14,7 @@ The deployment setting `images` controls automatic image feedback:
 | `on-demand` | Only images requested with `robo.show(camera)`, plus images passed to `display()`. |
 | `none` | No automatic camera images; images passed to `display()` are still attached. |
 
-The `python` and `run_program` tool schemas accept `image_return` to override the deployment setting for one call:
+The `python` tool schema accepts `image_return` to override the deployment setting for one call:
 
 | `image_return` | Behavior |
 | --- | --- |

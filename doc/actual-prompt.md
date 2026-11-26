@@ -1,10 +1,10 @@
 # 实际提示词快照
 
-本文展示 XPolicyLab 当前部署配置下，`robodojo play` 拼装并发送给模型的完整提示词文本。正文由代码生成，覆盖控制约定、交互协议、机器人 API 参考、RoboDojo RGB 知识和任务卡。OpenAI 请求中的工具 JSON Schema 通过独立的 `tools` 字段传递，不属于这段提示词文本。
+本文展示 XPolicyLab 当前部署配置下，每个回合拼装并发送给模型的完整提示词文本。正文由代码生成，覆盖控制约定、交互协议、机器人 API 参考、RoboDojo RGB 知识和任务卡。OpenAI 请求中的工具 JSON Schema 通过独立的 `tools` 字段传递，不属于这段提示词文本。
 
-任务编号、任务指令、种子、初始图像、两臂状态和环境步数会随运行变化；本文用 `<运行时...>` 标记这些字段。其他部分按当前代码及配置展开。每次真实运行的精确提示词保存在该运行目录的 `prompt.txt` 中，因为任务卡和环境状态不能由静态文档预先确定。
+任务变体、任务指令、初始图像、两臂状态和环境步数会随运行变化；本文用 `<运行时...>` 标记这些字段。任务编号和种子不进入提示词（RoboDojo Agent Track 规则第 1、6 节）。其他部分按当前代码及配置展开。每次真实运行的精确提示词保存在该运行目录的 `prompt.txt` 中，因为任务卡和环境状态不能由静态文档预先确定。
 
-当前快照使用 `integrations/xpolicylab/robodojo/deploy.yml` 中的设置：`robodojo_xpl_rgb`、`cells`、`no-vla`、`on-primitive`、`pure`、5400 秒和 100 次工具调用预算。提示词中的任务卡使用占位数据；模型实际收到的相机图片作为同一条初始用户消息中的图像内容发送。
+当前快照使用 `integrations/xpolicylab/robodojo/deploy.yml` 中的设置：`robodojo_xpl_rgb`、`cells`、`on-primitive`、`pure`、5400 秒和 100 次工具调用预算。提示词中的任务卡使用占位数据；模型实际收到的相机图片作为同一条初始用户消息中的图像内容发送。
 
 阅读交互协议的中文译文：[`actual-prompt.zh.md`](actual-prompt.zh.md)。
 
@@ -59,14 +59,13 @@ a pick-and-place plan should include:
 4. Move while holding the object to a position near the destination and
    confirm arrival.
 5. Place the object and confirm placement.
-6. Fully open both grippers, return both arms home, and confirm both arms
-   are home with both grippers fully open.
+6. Bring the robot to the final state the task description requires (for
+   example, grippers open and both arms back at their initial poses, or the
+   object still held) and confirm it.
 
 The complete plan must state the final goal, known scene facts, and unresolved
 questions. For every milestone, specify its target state and observable
-completion evidence. When applicable, make establishing an observer pose for
-the idle hand the first robot-action milestone, and include returning both
-arms home with confirmation before submitting the task. If a prerequisite is
+completion evidence. If a prerequisite is
 missing (for example, a demonstration still needs to be observed), plan and
 complete that prerequisite first; write the complete task plan before the
 first task action.
@@ -128,12 +127,15 @@ becomes unsafe or obstructs the task, replan and confirm a new safe observer
 pose before continuing. Choose the pose for the current scene; do not assume a
 fixed coordinate works in every scene.
 
-After the task result is confirmed, make fully opening both grippers and
-returning both arms home the final execution milestone. Call
-`set_gripper(arm, robo.OPEN)` for each arm, then return both arms home. Inspect
-robot state and confirm both arms are home and both grippers are fully open
-before submitting the task. Do not submit while the task result or any part of
-this final state is unconfirmed.
+After the task result is confirmed, read the task description for the final
+state it requires and make reaching that state the final execution milestone.
+If the description asks for open grippers and both arms back at their initial
+poses, call `set_gripper(arm, robo.OPEN)` for each arm and then return both
+arms home; if it asks for an object to stay held, inserted or in place, keep
+it so and do not open, withdraw or home. Do only what the description asks.
+Inspect the images and robot state and confirm the required final state before
+submitting the task. Do not submit while the task result or any part of the
+required final state is unconfirmed.
 
 ## Module 3: Motion Rules
 
@@ -336,6 +338,14 @@ robo.image(camera: str = 'cam_head', *, resolution: str = 'high', step: int = -1
             ``back_project`` always read the CURRENT observation, which is
             the latest recorded step.
 
+robo.sim_frames(step: int = -1, *, sim_step: int | None = None) -> list[dict[str, Any]]
+    Read the ordered Bridge frames captured during primitive step ``step``.
+
+    ``step`` is the primitive step (``-1`` means the latest); ``sim_step``
+    optionally selects its one-based receive-order frame number. Each result
+    includes ``seq``, ``source_step``, ``sim_step``, ``tool`` and RGB numpy
+    arrays in its ``images`` mapping.
+
 robo.show(camera: str = 'cam_head') -> None
     Attach the current image of ``camera`` to the feedback of this turn.
 
@@ -366,7 +376,7 @@ robo.segment(
     Segment an object in the current image of ``camera`` by a text prompt (SAM3).
 
     Args:
-        text_prompt: what to find, e.g. ``"the green bottle"``.  Name one
+        text_prompt: what to find, e.g. ``"the small red box"``.  Name one
             object by its visible properties.
         camera: ``"cam_head"`` (default), ``"cam_left_wrist"`` or
             ``"cam_right_wrist"``.
@@ -398,7 +408,7 @@ robo.back_project(row: int, col: int, camera: str = 'cam_head') -> SeenPoint
         object from this camera and the others that see it.
         ``"table"``: ``xyz`` is on the table top; a pixel that shows
         something too flat or too far to measure also answers so.  A thin
-        part in mid-air (a peg, a handle, a cable) is not measured
+        part in mid-air is not measured
         reliably: reason from the image and from ``locate`` of the whole
         object instead.
     Raises:
@@ -428,14 +438,14 @@ robo.locate(
     Returns:
         ObjectSight.  For a top grasp: ``move_to([x, y, top_z + 0.09],
         pitch=90)`` above it, ``locate`` it again from there (the wrist
-        camera then looks down on it and the reading is good to 1-2 mm),
-        turn to ``yaw=grasp_yaw`` and go down to the height to hold it
-        at.  With ``views >= 2`` and no ``note`` a block, a can, a bowl
-        or the body of a bottle is measured to 1-3 mm; a ``note`` that
+        camera then looks down on it and the reading is good to a few
+        mm), turn to ``yaw=grasp_yaw`` and go down to the height to hold
+        it at.  With ``views >= 2`` and no ``note`` a solid upright
+        object is measured to within a few mm; a ``note`` that
         the cameras agree only roughly leaves the height uncertain.  With
         ``views == 1`` the height is a guess, the tallest upright shape
-        that fits the one image: close for a box or a can, wrong for a
-        bowl, a cup or anything wider above than below, and for a tall
+        that fits the one image: close for a solid, straight-sided
+        object, wrong for a hollow one or anything wider above than below, and for a tall
         thing that tapers; ``center_xyz`` is then off, along the line
         away from the robot, by about half of what the height is wrong
         by.  An object once measured with ``views >= 2`` keeps that height
@@ -744,6 +754,11 @@ Exceptions:
 
 # Operating knowledge for RoboDojo: how the tools behave (no task recipes)
 
+The step counts, tolerances and fitted coefficients below describe how the
+tools and the simulator behave.  They were measured in a self-built test scene
+with objects we placed ourselves, not on any RoboDojo evaluation layout or task
+asset.
+
 ## Frames, units, robot
 - Two ARX-X5 arms, `"left"` and `"right"`, stand side by side at the near edge
   of a table; the head camera looks down the table from the robot's side.
@@ -785,8 +800,8 @@ Exceptions:
   cannot be followed the joints swing straight to the solution (up to 0.15 rad
   per joint per action) - away from objects only.  `path="line"` is the line
   or nothing: use it for every approach, descent and lift near objects.
-- In the simulator, pointing-down targets over the table arrived within
-  0.1 mm and 0.3 degrees, and line descents stayed on the line.  `reached`
+- Pointing-down targets over the table are reached well inside the
+  `reached` tolerance, and line descents stay on the line.  `reached`
   means within 0.01 m and 5 degrees.
 - Nothing moves when the pose is out of reach or every way there puts the arm
   into the table: `ik_error` says which, `steps_used` is 0, and for a pose
@@ -805,10 +820,10 @@ Exceptions:
   to 0.75 at y = -0.3, from -0.1 to 0.7 at y = -0.15 and from 0.1 to 0.5 at
   y = 0.0; the left arm is the mirror image.
 - So: a top grasp suits objects lower than about 0.15 m, approached from at
-  most 6-8 cm above; take tall objects (bottles, cups) from the side, level or
+  most 6-8 cm above; take a tall object from the side, level or
   slightly tilted (`pitch` 0-30, `yaw` towards the object), at about half
-  their height.  To carry something over a rim higher than about 0.9 m (a
-  box, a holder) hold it at `pitch` 30-60 or level: pointing straight down
+  its height.  To carry something over a rim higher than about 0.9 m
+  hold it at `pitch` 30-60 or level: pointing straight down
   cannot get that high.  Beyond that reach use the other arm, or push or hand
   the object closer first.
 - Carrying past things: lift first (straight up, `path="line"`), travel
@@ -818,7 +833,7 @@ Exceptions:
   the way (an object, the other arm).  Look before trying again.
 - The other arm holds its joints during a motion.  Move one arm at a time and
   keep the idle arm out of the working arm's way.
-- To twist something held (a key, a cap, a knob), `move_to` the same point
+- To twist something held, `move_to` the same point
   with another `roll` (straight down: another `yaw`); the last joint turns
   and the grasp point stays.  The wrist joint stops at about +-178 degrees.
 - `home(arm)` returns one arm, or `"both"`, to the joint angles it started
@@ -827,12 +842,12 @@ Exceptions:
   took 5 native actions from a short reach and more than 10 from a long one;
   test `reached` and call again if it is False.  Release what you hold and
   get clear of tall things before it: the swing plans no path.
-- A press (button, switch, key) is a motion: close the gripper, come down
-  pointing straight down over the point, `move_to` a grasp point 1-2 cm
-  BELOW where the fingertips would touch (they reach 1.3 cm beyond the grasp
-  point) with `path="line"`, then back up.  The fingertips stop where the
-  button bottoms out, so `reached` may read False there.  Check the visible
-  effect requested by the instruction.
+- To push down on a point, the fingertips do the pushing: they reach 1.3 cm
+  beyond the grasp point, so a closed gripper pointing straight down touches the
+  surface when the grasp point is 1.3 cm above it.  A target where the contact
+  stops short (the surface does not yield) leaves the arm short of the commanded
+  pose, so `reached` may read False; judge the result from its visible effect,
+  not from `reached`.
 - For budgeting: a 10 cm line costs about 5 native actions, a 40 cm swing
   with a 90 degree turn about 15; `steps_used` reports it.  Every native action
   counts against the episode's budget (the task card states it; `Gripper.step`
@@ -849,11 +864,11 @@ Exceptions:
   the fingers stop, 2 to 10 native actions) without moving the arms.  After a
   close, `holding` says the fingers stopped on something (anything thicker
   than about 3 mm) and `width_m` how wide it is across the fingers
-  (0.002 m + 0.109 m x opening: a 3.5 cm block reads 0.035 held across two
-  faces and 0.049 across its diagonal; within 1 mm on things from 3 to 8 cm).
+  (0.002 m + 0.109 m x opening: a cube of side s reads about s held across
+  two faces and about 1.4 s across its diagonal; within 1 mm from 3 to 8 cm).
   `set_gripper(arm, robo.OPEN, opening=0.5)` opens only that far: something
   0.002 + 0.109 x opening metres wide then just fits (0.5: 5.7 cm), to reach
-  between close neighbours (slices in a rack, tools in a tray) without
+  between closely spaced neighbours without
   catching them.
 - The fingers are position-controlled: the squeeze grows with how far the
   object keeps them from closing (about 23 N per cm per finger), so a thin
@@ -865,15 +880,15 @@ Exceptions:
   gripper covers it.
 - Carry with `gripper=robo.CLOSE` in every `move_to` that transports an
   object; `robo.OPEN` in a motion drops it.
-- Thin and flat parts (handles, boards, a set square) are easy to miss or let
+- A thin, flat part is easy to miss or let
   slip: close across the thin side, and compare `width_m` with the part's
   thickness before lifting; `holding` False or a width far from it is a miss.
 - A top grasp with these tools: `locate` the object; `set_gripper(arm, OPEN)`;
   `move_to` above it pointing down (`pitch=90`, 8-10 cm above `top_z`) and
   `locate` it again from there (see Perception); turn to `yaw=grasp_yaw` and
   descend with `path="line"` until the pads cover the top part of the object
-  (a 3.5 cm block: grasp point about 1.8 cm below its top, and never lower
-  than 1.6 cm above the table: a target below that is refused);
+  (a small block: grasp point about half its height below its top, and never
+  lower than 1.6 cm above the table: a target below that is refused);
   `set_gripper(arm, CLOSE)`; lift with `path="line"`; confirm.  A side grasp
   of an upright object: level (`pitch=0, roll=0`: the fingers close
   horizontally), `yaw` pointing from the arm's base at the object, grasp
@@ -897,30 +912,31 @@ Exceptions:
   rectangle around it), its long axis `long_axis_deg` (from +x) and
   `grasp_yaw`, the `yaw` that closes pointing-down fingers across its narrow
   side (a cube's: across two faces).  `center_xyz` is the middle of that
-  rectangle: a handle, a spout or a tail belongs to the footprint and pulls
-  the middle away from the body's.  A hollow one (bowl, bin) gives its rim as
-  `top_z`.  Nothing moves.
+  rectangle: a protruding part (a handle, a spout, a tail) belongs to the
+  footprint and pulls the middle away from the body's.  A hollow object gives
+  its rim as `top_z`.  Nothing moves.
 - One camera cannot tell how tall a thing is: a low deep object and a tall
   shallow one look the same from it.  `views` says how many cameras agreed on
-  the measurement.  With `views >= 2` and no `note`, a block, a can, a bowl or
-  the body of a bottle is measured to 1-3 mm, its height included.  A `note`
+  the measurement.  With `views >= 2` and no `note`, a solid upright object
+  is measured to within a few mm, its height included.  A `note`
   that the cameras agree only roughly means the second camera saw part of it
   or saw it badly: the position is usable, the height may be centimetres off.
   With `views == 1` the height is a guess, the tallest upright shape that
-  fits the one image: close for a box or a can, wrong for a bowl, a cup, a mug
-  or anything wider above than below, and for a tall thing that tapers.
+  fits the one image: close for a solid, straight-sided object, wrong for a
+  hollow one or anything wider above than below, and for a tall thing that
+  tapers.
   `center_xyz` is then off, along the line away from the robot, by about half
   of what the height is wrong by, and `note` says that it is a guess.
 - The view that settles a measurement is from above.  For something low it
   is the one a top grasp passes through anyway: the gripper pointing straight
   down with its grasp point 8-10 cm above the object (`move_to([x, y, top_z +
-  0.09], arm, pitch=90)`).  For something tall (a bottle, a holder) or further
-  out, where a gripper pointing straight down does not reach, tilt it:
-  `pitch=45` to `60`, the grasp point over the object and 5-10 cm above its
-  top (for a 19 cm bottle near the robot, `move_to([x, y + 0.04, 1.03], arm,
-  pitch=60)`; at that height an arm reaches to about y = 0.05).  The wrist
-  camera then looks down on the object while the head camera sees it from the
-  side, and `locate` is good to 1-2 mm on a block and 3-4 mm on a bottle, in
+  0.09], arm, pitch=90)`).  For something tall or further out, where a
+  gripper pointing straight down does not reach, tilt it: `pitch=45` to `60`,
+  the grasp point over the object, a little beyond its centre, and 5-10 cm
+  above its top (`move_to([x, y + d, top_z + h], arm, pitch=60)`, with d a few
+  cm and h 0.05-0.10; check the reach at that height under Motion).  The
+  wrist camera then looks down on the object while the head camera sees it
+  from the side, and `locate` is good to a few mm on most objects, in
   place and in height.  So: `locate` from where you are for a first position,
   move above it, `locate` again, and grasp or place by the second reading.  Do
   the same over the place where something is to be put down (a stack, a slot,
@@ -958,14 +974,14 @@ Exceptions:
   measures it as `locate` does and returns where the pixel's ray meets it
   (`surface == "object"`); a pixel on the table top itself returns that point
   of the table, exactly (`surface == "table"`), and so does one on something
-  too flat or too far to measure.  A thin part in mid-air (a peg, a handle)
+  too flat or too far to measure.  A thin part in mid-air
   is not measured reliably.
 - All of them read the CURRENT observation: localise, act, then localise
   again.  Positions from before a contact are stale.
 - A mask is the best match for the text, not proof of identity.  Describe one
   object by colour, shape and position; check `score` and where `centroid`
-  falls in the image before acting on it.  If a name finds nothing, try what
-  it looks like (`"yellow cube"` for a textured block).  Words like "left"
+  falls in the image before acting on it.  If a name finds nothing, try a
+  description of its colour and shape instead.  Words like "left"
   or "front" do not make it choose another of several alike objects: when two
   prompts give the same centre they found the same object; tell instances
   apart in the image (or with `segment`'s box) instead.  What the robot's own
@@ -979,13 +995,13 @@ Exceptions:
   task-success flag.  Judge progress from the images and the robot state,
   and say so when you cannot tell.
 - Grasp: the target leaves its place and moves with the arm.
-- An amount the instruction names ("lift it by 10 cm") is measured on the
-  object, not on the gripper: a held object sags and slips a little in the
-  fingers.  Go 2-3 cm beyond the amount asked.
+- An amount the instruction names is measured on the object, not on the
+  gripper: a held object sags and slips a little in the fingers, so the
+  object rises less than the grasp point does.  Allow for that gap when the
+  instruction asks for a particular displacement.
 - Transport: the hold stays stable through the lift and the lateral move.
-- Placement: the object rests where the instruction wants it after the
-  gripper has opened and the arm has withdrawn; an object on a rim or beside
-  its destination is not placed.
+- Placement: the object rests where the instruction wants it, fully supported
+  there, after the gripper has opened and the arm has withdrawn.
 - Finish when the scene shows that the instruction is satisfied.
 
 ## Safety and recovery
@@ -1000,11 +1016,16 @@ Exceptions:
 
 # Task card
 - robot: robodojo_xpl_rgb
-- task: <运行时任务编号>
 - variant: <运行时任务变体>
-- seed: <运行时种子>
-- task instruction (authoritative): '<运行时任务指令>'
 - initial arm state: <运行时两臂状态>
 - simulator step budget: <运行时环境步数>
 - attached images: cam_head (<初始头部相机图像>), cam_left_wrist (<初始左腕相机图像>), cam_right_wrist (<初始右腕相机图像>). They are step 0 of your run, exactly what `robo.image('cam_head')`, `robo.image('cam_left_wrist')`, `robo.image('cam_right_wrist')` return before any motion.
+
+## Task description (official, authoritative)
+
+The benchmark's own description of this task, verbatim:
+
+<<<
+<运行时任务指令>
+>>>
 ```
