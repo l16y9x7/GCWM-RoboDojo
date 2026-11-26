@@ -6,18 +6,18 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 
-"""Robot-independent core of a PyRUA-Lean robot class.
+"""Robot-independent core of a robot class.
 
-A robot class (``LiberoRobot``, ``RobocasaRobot``, ``RobotwinRobot``,
-``RobodojoRobot``) is the only object a policy sees.  Every public method maps
-1:1 onto one RPent tool of that robot and returns a frozen dataclass; this
+The robot class (:class:`robodojo.robodojo_xpl_rgb.RobodojoOfficialColourRobot`, built on
+:class:`robodojo.robodojo.RobodojoRobot`) is the only object a policy sees.  Every public
+method maps 1:1 onto one tool of the host and returns a frozen dataclass; this
 module holds what all of them share: the backend dispatch with the call ledger, the episode guard
 (``EpisodeFinished`` once the task predicate fired or the host stopped the
 episode), image / world-map / artifact access and the ``show`` request used
 by the ``on-demand`` image policy.
 
 Subclasses set the class attributes below and implement
-:meth:`_state_from_envelope` (turn RPent's observation envelope into their
+:meth:`_state_from_envelope` (turn the host's observation envelope into their
 ``State`` dataclass) and :meth:`_summary_dict` (a small dict the tool
 feedback shows after every turn).  Public methods are rendered into the model-facing
 API reference from their signatures and docstrings, so every attribute or
@@ -26,7 +26,6 @@ method that is not meant for the policy must start with an underscore.
 
 from __future__ import annotations
 
-import functools
 import io
 import time
 from collections.abc import Callable
@@ -34,29 +33,12 @@ from typing import Any, ClassVar
 
 from ._backend import Backend, EpisodeFinished, Ledger, ToolError, raise_for_error, unwrap
 
-#: Primitive sets a run can expose to the policy: ``full`` (every public
-#: method) or ``no-vla`` (the learned VLA primitives named by
-#: ``VLA_PRIMITIVES`` are hidden from the API reference and refused at call
-#: time, so the planner solves the task with the analytic primitives only).
-PRIMITIVE_SETS = ("full", "no-vla")
-#: What a hidden primitive raises (and what the cell output shows).
-NO_VLA_MESSAGE = "{name} is not available in this run (no-VLA primitive set)"
-
 
 class RobotBase:
     """Shared machinery of every robot class (see the module docstring)."""
 
-    #: RPent robot name (``rpent --robot <NAME>``) and the knowledge file stem.
+    #: The robot's name.
     NAME: ClassVar[str] = ""
-    #: Public methods that run a learned VLA policy.  Under the ``no-vla``
-    #: primitive set they are left out of the API reference (with the result
-    #: types only they return) and every call raises :data:`NO_VLA_MESSAGE`.
-    VLA_PRIMITIVES: ClassVar[tuple[str, ...]] = ()
-    #: ``(old, new)`` edits applied to the rendered API reference under
-    #: ``no-vla``: the sentences of the *remaining* docstrings that describe
-    #: the VLA.  Each ``old`` must occur exactly once, so a docstring change
-    #: fails loudly instead of leaking a VLA mention.
-    VLA_REFERENCE_EDITS: ClassVar[tuple[tuple[str, str], ...]] = ()
     #: Camera names accepted by :meth:`image`, :meth:`world_map` and :meth:`show`.
     CAMERAS: ClassVar[tuple[str, ...]] = ()
     #: ``(camera, resolution) -> recorded image artifact name``.
@@ -77,7 +59,6 @@ class RobotBase:
         "final_dist_m",
         "final_eef_pos",
         "steps_used",
-        "chunks_used",
         "found",
         "score",
         "world_xyz",
@@ -92,9 +73,7 @@ class RobotBase:
     #: robot class makes them raise instead of answering with a constant.
     ABSENT_MEMBERS: ClassVar[frozenset[str]] = frozenset()
 
-    def __init__(self, backend: Backend, *, ledger: Ledger | None = None, primitives: str = "full"):
-        if primitives not in PRIMITIVE_SETS:
-            raise ValueError(f"primitives must be one of {PRIMITIVE_SETS}, got {primitives!r}")
+    def __init__(self, backend: Backend, *, ledger: Ledger | None = None):
         self._backend = backend
         self._ledger = ledger if ledger is not None else Ledger()
         self._last_state: Any = None
@@ -102,26 +81,8 @@ class RobotBase:
         self._truncated = False
         self._stop_reason: str | None = None
         self._show_requests: list[str] = []
-        self._primitives = primitives
-        self._hidden: frozenset[str] = (
-            frozenset(self.VLA_PRIMITIVES) if primitives == "no-vla" else frozenset()
-        )
-        # Instance attributes shadow the class methods, so a hidden primitive
-        # is refused before any argument validation, whatever it was called with.
-        for name in self._hidden:
-            setattr(self, name, functools.partial(self._refuse_hidden, name))
 
     # -- host-facing helpers (not part of the policy API) -------------------
-
-    def _refuse_hidden(self, name: str, *args: Any, **kwargs: Any) -> Any:
-        """Record and refuse a call to a primitive outside the run's primitive set."""
-        message = NO_VLA_MESSAGE.format(name=name)
-        record = self._ledger.open(
-            name, {"args": list(args), **kwargs} if args else kwargs, stateful=False
-        )
-        record.error = f"RuntimeError: {message}"
-        self._ledger.commit(record)
-        raise RuntimeError(message)
 
     def _take_show_requests(self) -> list[str]:
         """Return and clear the cameras requested through :meth:`show`."""
@@ -305,8 +266,7 @@ class RobotBase:
 
         ``terminated`` / ``truncated`` come from the envelope and from the
         parsed state when it has attributes of those names, so a robot whose
-        success flag RPent names differently (``eval_success``) or whose step
-        budget RPent never reports maps them in ``_state_from_envelope``
+        host names them differently maps them in ``_state_from_envelope``
         instead of overriding this method.
         """
         if envelope is None:
@@ -378,4 +338,4 @@ class RobotBase:
             self._ledger.commit(record)
 
 
-__all__ = ["NO_VLA_MESSAGE", "PRIMITIVE_SETS", "RobotBase", "ToolError"]
+__all__ = ["RobotBase", "ToolError"]

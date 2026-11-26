@@ -8,35 +8,28 @@
 
 """RoboDojo robot API for code policies.
 
-Perception (``segment``, ``back_project``) and the frozen Pi0.5 policy
-(``pi0_pick``) are RPent's RoboDojo tools (``robots/robodojo/tools.py``) with
-RPent's argument names and defaults.  Motion and grasping are this library's
-own (``hosts/robodojo_tools.py``, registered on RPent's toolkit at boot, so they
-are executed and recorded like RPent's tools): RPent's toolset moves an arm by
-position only and its IK lets the wrist drift, which leaves a program unable to
-orient the fingers for a grasp or to bring an arm back to its starting pose,
-and RoboDojo counts 45 of its 54 tasks as solved only with both arms back.
-``move_to`` solves a full-pose IK in the host (``hosts/robodojo_kinematics.py``,
-the benchmark's URDF fitted to the reported poses exactly) and moves the grasp
-point along a straight line; ``set_gripper`` (a full stroke that reports what
-it holds), ``locate`` (an object's 3D extent from its mask and the depth image)
-and ``home`` complete the set.  Only what a program cannot compose from the
-others is a primitive: a button press is a ``move_to`` past the surface, a
-twist is a ``move_to`` with another ``roll``.  The calling convention is
-the library's: a policy is an ordinary Python program that calls these methods
-and branches on their typed return values.
+Motion and grasping are this library's own (``hosts/robodojo_tools.py``): ``move_to`` solves a
+full-pose IK in the host (``hosts/robodojo_kinematics.py``, the benchmark's URDF fitted to the
+reported poses exactly) and moves the grasp point along a straight line, so a program can
+orient the fingers for a grasp and bring an arm back to its starting pose; ``set_gripper`` (a
+full stroke that reports what it holds) and ``home`` complete the motion set.  Perception is
+``segment``, ``back_project`` and ``locate`` (an object's 3D extent from its mask).  Only what
+a program cannot compose from the others is a primitive: pushing down on a point is a ``move_to`` past
+the surface, a twist is a ``move_to`` with another ``roll``.  The calling convention is the
+library's: a policy is an ordinary Python program that calls these methods and branches on
+their typed return values.
 
-RoboDojo is the one robot whose success flag RPent keeps from its planner:
-official success is read by the runner after the planner has finished, and no
-tool result carries it.  This class keeps that regime, so the code arm sees
-what the tool-calling arm sees: it has no ``done`` (``ABSENT_MEMBERS``; the
-attribute raises rather than answering a constant False that a
-``while not robo.done`` loop would spin on), its ``State`` has no
-``terminated`` and no result has a success-of-the-task field.  The host reads
-the verdict from the backend when the episode is over.
+RoboDojo reports no task success while the episode runs: its evaluation client judges the
+scene when the episode is over.  So the robot has no ``done`` (``ABSENT_MEMBERS``; the
+attribute raises rather than answering a constant False that a ``while not robo.done`` loop
+would spin on), its ``State`` has no ``terminated`` and no result has a success-of-the-task
+field.  The host reads the verdict from the backend when the episode is over.
 
-The docstrings in this module are the model-facing documentation: the prompt
-is generated from them (see :mod:`robodojo.prompt`), so keep them accurate.
+:class:`RobodojoRobot` is the station's motion, gripper and state;
+:class:`robodojo.robodojo_xpl_rgb.RobodojoOfficialColourRobot` builds on it with the
+perception that RoboDojo's evaluation client allows (colour images only) and is the robot
+the agent drives.  The docstrings are the model-facing documentation: the prompt is generated
+from them (see :mod:`robodojo.prompt`), so keep them accurate.
 """
 
 from __future__ import annotations
@@ -47,10 +40,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from ._robot import RobotBase
-from .robots import RobotAdapter
 
-#: Native actions one Pi0.5 chunk can execute (the policy's prediction horizon).
-VLA_CHUNK_ACTIONS = 50
 #: ``move_to`` has arrived when the grasp point is this close (metres) ...
 MOVE_TOL_M = 0.01
 #: ... and the gripper is turned less than this from the asked orientation (degrees).
@@ -222,39 +212,6 @@ class Gripper:
 
 
 @dataclass(frozen=True)
-class Pick:
-    """Outcome of ``pi0_pick``.
-
-    success: the grasp HEURISTIC fired for some arm: it descended at least
-        0.06 m, then rose at least 0.04 m with its gripper below 0.55.  It is
-        provisional and errs both ways: it says nothing about which object is
-        held, and it stays False for an arm that grasped without first going
-        down 0.06 m.  Read ``left`` / ``right`` and confirm from the wrist camera.
-    instruction: the text the policy received.
-    chunks_used: policy chunks executed (each up to 50 native actions; a chunk
-        is cut short the moment the heuristic fires).
-    left / right: what each arm did, as a dict of end-effector heights (metres)
-        and measured gripper openings (1.0 = open, 0.0 = closed):
-        ``start_eef_z``, ``min_eef_z`` (the lowest point reached),
-        ``peak_eef_z`` (the highest point after that), ``peak_lift_m`` (peak -
-        min), ``start_gripper``, ``final_gripper``.  The policy drives BOTH
-        arms and picks the arm itself; inspect both.
-    monitored_arm: the ``arm`` argument, echoed.
-    budget_exhausted: the native-action budget ran out during the pick.
-    truncated: same condition, as recorded in the state after the call.
-    """
-
-    success: bool
-    instruction: str
-    chunks_used: int
-    left: dict[str, float]
-    right: dict[str, float]
-    monitored_arm: str
-    budget_exhausted: bool
-    truncated: bool
-
-
-@dataclass(frozen=True)
 class Segment:
     """Outcome of ``segment``.
 
@@ -292,7 +249,7 @@ class WorldPoint:
 
 @dataclass(frozen=True)
 class ObjectPose:
-    """Outcome of ``locate``: an object measured from its mask and the depth image.
+    """Outcome of ``locate``: an object measured from its mask.
 
     found: SAM3 produced a mask scoring at least ``min_score``.
     center_xyz: [x, y, z] of the middle of the smallest rectangle around the
@@ -313,10 +270,10 @@ class ObjectPose:
     centroid: (row, col) of the mask in the image, as ``Segment.centroid``.
     area_px: mask pixels.
     camera: the camera measured from.
-    note: why there is no 3D measurement (a flat object, no depth), else None.
+    note: why there is no 3D measurement (a flat object), else None.
 
     The camera sees the top and the near side.  The far side of an object that
-    is round about an upright axis (a bottle, a cup) is filled in from the arc
+    is round about an upright axis (a cylinder) is filled in from the arc
     that is seen; the far side of anything else, and what other things or the
     robot's own gripper hide, is not measured, so such a footprint can be
     shorter than the object.  A held object is usually not found from the head
@@ -338,7 +295,7 @@ class ObjectPose:
     note: str | None
 
 
-STATEFUL_TOOLS = frozenset({"move_pose", "grip", "home", "pi0_pick"})
+STATEFUL_TOOLS = frozenset({"move_pose", "grip", "home"})
 
 
 def _floats(value: Any, n: int, name: str) -> tuple[float, ...]:
@@ -483,21 +440,6 @@ def _angle(value: Any, name: str) -> float | None:
     return out
 
 
-_PICK_ARM_KEYS = (
-    "start_eef_z",
-    "min_eef_z",
-    "peak_eef_z",
-    "peak_lift_m",
-    "start_gripper",
-    "final_gripper",
-)
-
-
-def _pick_arm(raw: Any) -> dict[str, float]:
-    raw = raw if isinstance(raw, dict) else {}
-    return {key: float(raw.get(key, math.nan)) for key in _PICK_ARM_KEYS}
-
-
 # ---------------------------------------------------------------------------
 # The robot
 # ---------------------------------------------------------------------------
@@ -532,7 +474,7 @@ class RobodojoRobot(RobotBase):
     ``Gripper.opening``) are openings: 1.0 = open, 0.0 = closed on nothing.
 
     Every native action (one step of ``move_to``, ``set_gripper`` or
-    ``home``, one VLA action) counts against the episode's
+    ``home``) counts against the episode's
     native-action budget; when it is spent the state reports ``truncated``
     and motion calls raise ``EpisodeFinished``.  Motion calls block until the
     primitive finishes and return a typed result; nothing is queued.
@@ -543,9 +485,6 @@ class RobodojoRobot(RobotBase):
     prompt and measures it in 3D (centre, top, footprint, heading);
     ``segment`` / ``back_project`` give a mask centroid and the world point at
     one pixel.  Object poses are never given.
-
-    The frozen Pi0.5 VLA (``pi0_pick``) is a learned dual-arm policy trained on
-    demonstrations of this benchmark's tasks.
     """
 
     ARMS: tuple[str, str] = ("left", "right")
@@ -563,13 +502,12 @@ class RobodojoRobot(RobotBase):
         Gripper,
         Home,
         ObjectPose,
-        Pick,
         Segment,
         WorldPoint,
     )
     NAME: ClassVar[str] = "robodojo"
-    #: No success flag while the episode runs (RPent keeps it from its planner
-    #: too) and no recorded world maps: neither member is in the reference.
+    #: No success flag while the episode runs and no recorded world maps: neither member
+    #: is in the reference.
     ABSENT_MEMBERS: ClassVar[frozenset[str]] = frozenset({"done", "world_map"})
     CAMERAS: ClassVar[tuple[str, ...]] = ("cam_head", "cam_left_wrist", "cam_right_wrist")
     IMAGE_ARTIFACTS: ClassVar[dict[tuple[str, str], str]] = {
@@ -577,30 +515,16 @@ class RobodojoRobot(RobotBase):
         ("cam_left_wrist", "high"): "cam_left_wrist.png",
         ("cam_right_wrist", "high"): "cam_right_wrist.png",
     }
-    # RoboDojo records no depth or world-map artifacts: depth is only reachable
-    # through ``back_project`` on the current observation.
+    # RoboDojo records no world-map artifacts: a pixel's world point is reachable through
+    # ``back_project`` on the current observation.
     WORLD_MAP_ARTIFACTS: ClassVar[dict[tuple[str, str], str]] = {}
-    # RPent embeds all three views in every ``view_env_state``; keep parity.
+    # Every ``view_env_state`` carries all three views.
     ON_MOTION_IMAGES: ClassVar[tuple[str, ...]] = (
         "cam_head.png",
         "cam_left_wrist.png",
         "cam_right_wrist.png",
     )
     STATEFUL_TOOLS: ClassVar[frozenset[str]] = STATEFUL_TOOLS
-    #: The frozen Pi0.5 pick (hidden and refused under the no-VLA primitive set).
-    VLA_PRIMITIVES: ClassVar[tuple[str, ...]] = ("pi0_pick",)
-    #: VLA sentences of the remaining docstrings, removed from the no-VLA reference.
-    VLA_REFERENCE_EDITS: ClassVar[tuple[tuple[str, str], ...]] = (
-        (
-            "    ``home``, one VLA action) counts against the episode's\n",
-            "    ``home``) counts against the episode's\n",
-        ),
-        (
-            "\n\n    The frozen Pi0.5 VLA (``pi0_pick``) is a learned dual-arm policy trained on\n"
-            "    demonstrations of this benchmark's tasks.",
-            "",
-        ),
-    )
     SUMMARY_KEYS: ClassVar[tuple[str, ...]] = (
         "success",
         "reached",
@@ -614,7 +538,6 @@ class RobodojoRobot(RobotBase):
         "holding",
         "opening",
         "width_m",
-        "chunks_used",
         "ik_error",
         "found",
         "score",
@@ -693,10 +616,10 @@ class RobodojoRobot(RobotBase):
     def camera_meta(self, camera: str = "cam_head", *, step: int = -1) -> dict[str, Any]:
         """Return the calibration of one camera at a recorded step as a dict.
 
-        Keys: ``shape`` (image shape), ``intrinsic_matrix`` (3x3),
+        Keys: ``shape`` (image shape), ``intrinsic_matrix`` (3x3) and
         ``extrinsic_matrix`` (4x4 camera-to-world; the camera looks down its
-        own -z axis with +y up) and ``has_depth``.  The wrist cameras move
-        with their arm.
+        own -z axis with +y up), as the observation of that step has them.  The
+        wrist cameras move with their arm.
         """
         camera = _camera(camera, self.CAMERAS)
         payload = self._readonly(self.STATE_TOOL, {"step": int(step)})
@@ -729,7 +652,7 @@ class RobodojoRobot(RobotBase):
         """Segment an object in the current image of ``camera`` by a text prompt (SAM3).
 
         Args:
-            text_prompt: what to find, e.g. ``"the green bottle"``.  Name one
+            text_prompt: what to find, e.g. ``"the small red box"``.  Name one
                 object by its visible properties.
             camera: ``"cam_head"`` (default), ``"cam_left_wrist"`` or
                 ``"cam_right_wrist"``.
@@ -777,8 +700,7 @@ class RobodojoRobot(RobotBase):
             surface.  A pixel on an object's edge or a thin part can land on
             the table or the background behind it: prefer ``Segment.centroid``.
         Raises:
-            ToolError: pixel out of range, no valid depth there, or the
-            camera calibration is missing.
+            ToolError: pixel out of range, or nothing to say where the ray ends.
         """
         camera = _camera(camera, self.CAMERAS)
         kwargs: dict[str, Any] = {"row": int(row), "col": int(col), "camera": camera}
@@ -796,10 +718,10 @@ class RobodojoRobot(RobotBase):
     ) -> ObjectPose:
         """Find an object by a text prompt and measure it in 3D.
 
-        SAM3 segments the current image of ``camera`` (as ``segment``); every
-        pixel of the mask is then projected into the world through the depth
-        image, and the points above the table give the object's centre, top,
-        footprint and heading.  Nothing moves.
+        SAM3 segments the current image of ``camera`` (as ``segment``); the
+        mask's pixels are then measured in the world, and the points above the
+        table give the object's centre, top, footprint and heading.  Nothing
+        moves.
 
         Args:
             text_prompt: one object by its visible properties, e.g. ``"the
@@ -847,68 +769,6 @@ class RobodojoRobot(RobotBase):
             camera=str(p.get("camera", camera)),
             note=str(p["geometry_error"]) if p.get("geometry_error") else None,
         )
-
-    # -- the VLA ------------------------------------------------------------
-
-    def pi0_pick(self, prompt: str | None = None, arm: str = "right", max_chunks: int = 8) -> Pick:
-        """Run the frozen Pi0.5 policy closed loop until an arm has lifted something.
-
-        The policy was trained on complete demonstrations of this benchmark's
-        tasks, each under its task instruction: it is a whole-task policy, not
-        a grasp skill (the name is RPent's).  It receives the three current
-        camera images, both arms' joint state and an instruction, and drives
-        BOTH arms for up to ``max_chunks`` chunks of up to 50 native actions
-        each.  The call returns as soon as its grasp heuristic fires (an arm
-        went down, came back up at least 0.04 m and has its gripper closed) or
-        the budget runs out; called again, the policy carries on from the
-        scene as it then is.
-
-        Args:
-            prompt: the instruction for the policy.  None (default) uses the
-                benchmark's own task instruction (``robo.task``).  An override
-                must name the intended object by what distinguishes it (not
-                just "pick the bottle") and must not contain template markers
-                such as ``<target>``.
-            arm: recorded as ``monitored_arm`` only; the policy chooses the arm
-                itself and the heuristic watches both.
-            max_chunks: upper bound on policy chunks (>= 1).  Each chunk can
-                spend 50 native actions of the episode's budget, so the
-                default can spend 400.
-        Returns:
-            Pick; ``success`` is a provisional heuristic.  Look at the wrist
-            camera of the arm that lifted (``Pick.left`` / ``Pick.right``) to
-            confirm that the intended object is held.  A broad task
-            instruction may fit several objects and promises no grasp order.
-        Raises:
-            ToolError: the policy service is unavailable or the prompt was
-            rejected.
-        """
-        arm = _arm(arm)
-        if int(max_chunks) < 1:
-            raise ValueError("max_chunks must be at least 1")
-        kwargs: dict[str, Any] = {"arm": arm, "max_chunks": int(max_chunks)}
-        if prompt is not None:
-            text = str(prompt)
-            if not text.strip():
-                raise ValueError("prompt must not be empty; pass None to use the task instruction")
-            if "<" in text or ">" in text:
-                raise ValueError("prompt must not contain template markers such as <target>")
-            kwargs["prompt"] = text
-
-        def build(p: dict[str, Any]) -> Pick:
-            arms = p.get("arms") or {}
-            return Pick(
-                success=bool(p.get("success")),
-                instruction=str(p.get("instruction") or ""),
-                chunks_used=int(p.get("chunks_used", 0)),
-                left=_pick_arm(arms.get("left")),
-                right=_pick_arm(arms.get("right")),
-                monitored_arm=str(p.get("monitored_arm", arm)),
-                budget_exhausted=bool(p.get("terminated")),
-                truncated=self._latest_state().truncated,
-            )
-
-        return self._stateful("pi0_pick", kwargs, build)
 
     # -- motion -------------------------------------------------------------
 
@@ -1096,9 +956,8 @@ class RobodojoRobot(RobotBase):
     def _absorb(self, envelope: dict[str, Any] | None) -> None:
         """Latch ``truncated`` only.
 
-        RPent records ``terminated=False`` on purpose (official success is read
-        by its runner after the planner); nothing an envelope says may end
-        this episode as a success either.
+        RoboDojo's verdict is the evaluation client's, given when the episode is
+        over; nothing an envelope says may end this episode as a success.
         """
         if envelope is None:
             return
@@ -1124,24 +983,7 @@ class RobodojoRobot(RobotBase):
         return out
 
 
-ADAPTER = RobotAdapter(
-    name="robodojo",
-    robot_cls=RobodojoRobot,
-    host="robodojo.hosts.xpolicylab_robodojo",
-    knowledge="robodojo",
-    blurb="a dual-arm ARX-X5 robot in the RoboDojo benchmark",
-    guides_subdir="",
-    guide_names=(),
-    show_examples=(
-        "`robo.show('cam_head')`, `robo.show('cam_left_wrist')` or `robo.show('cam_right_wrist')`"
-    ),
-    services="a frozen Pi0.5 VLA and a SAM3 segmentation service",
-    services_novla="a SAM3 segmentation service",
-)
-
-
 __all__ = [
-    "ADAPTER",
     "ArmState",
     "Gripper",
     "HOME_MAX_ACTIONS",
@@ -1151,13 +993,11 @@ __all__ = [
     "MOVE_TOL_M",
     "Move",
     "ObjectPose",
-    "Pick",
     "RobodojoRobot",
     "STATEFUL_TOOLS",
     "Segment",
     "State",
     "TCP_OFFSET",
-    "VLA_CHUNK_ACTIONS",
     "WorldPoint",
     "gripper_angles",
 ]
