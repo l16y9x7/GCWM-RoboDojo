@@ -17,7 +17,8 @@ XPL_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 BENCH_ROOT="$(cd "${XPL_ROOT}/.." && pwd)"
 UTILS_DIR="${XPL_ROOT}/utils"
 
-# Reuse the local PyRUA-Lean gateway settings without copying credentials.
+# The model's endpoint and name: from the environment, or from an env file next to this script
+# (ROBODOJO_ENV_FILE) that keeps credentials out of the repository.
 ROBODOJO_ENV_FILE="${ROBODOJO_ENV_FILE:-${SCRIPT_DIR}/.env}"
 if [[ -f "${ROBODOJO_ENV_FILE}" ]]; then
     set -a
@@ -25,16 +26,11 @@ if [[ -f "${ROBODOJO_ENV_FILE}" ]]; then
     source "${ROBODOJO_ENV_FILE}"
     set +a
 fi
-unset HIGHWAY_TOKEN
 
-export ROBODOJO_MODEL="${ROBODOJO_MODEL:-${DMXAPI_MODEL:-${PYRUALEAN_MODEL:-}}}"
-export ROBODOJO_BASE_URL="${ROBODOJO_BASE_URL:-${DMXAPI_BASE_URL:-${OPENAI_BASE_URL:-}}}"
-if [[ -z "${ROBODOJO_API_KEY_ENV:-}" ]]; then
-    if [[ -n "${DMXAPI_TOKEN:-}" ]]; then
-        export ROBODOJO_API_KEY_ENV=DMXAPI_TOKEN
-    elif [[ -n "${OPENAI_API_KEY:-}" ]]; then
-        export ROBODOJO_API_KEY_ENV=OPENAI_API_KEY
-    fi
+export ROBODOJO_MODEL="${ROBODOJO_MODEL:-}"
+export ROBODOJO_BASE_URL="${ROBODOJO_BASE_URL:-${OPENAI_BASE_URL:-}}"
+if [[ -z "${ROBODOJO_API_KEY_ENV:-}" && -n "${OPENAI_API_KEY:-}" ]]; then
+    export ROBODOJO_API_KEY_ENV=OPENAI_API_KEY
 fi
 
 if [[ -z "${ROBODOJO_MODEL}" || -z "${ROBODOJO_BASE_URL}" ]]; then

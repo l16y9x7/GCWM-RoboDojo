@@ -10,13 +10,7 @@ __pycache__/
 build/
 dist/
 
-# Experiment outputs stay local: run directories, results and logs.  Tracked under runs/:
-# the empty memory corpora for RPent's local memory profile.
-runs/*
-!runs/_empty-memory/
-!runs/_empty-memory-robotwin/
-!runs/_empty-memory-robocasa/
+# Experiment outputs stay local: run directories, results and logs.
+runs/
 results/
 logs/
-# the built documentation (mkdocs build)
-site/

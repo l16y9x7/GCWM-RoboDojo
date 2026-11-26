@@ -6,23 +6,14 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 
-"""Tool surfaces for the code arms, served to an agent loop through MCP.
+"""The agent's tools and its contract.
 
-Two arms, one contract.  Each is a tiny toolkit (``get_tools_spec`` /
-``execute_tool``) that an MCP server can expose to Codex:
-
-* ``cells``  - one tool ``python(code)``: the code runs in a *persistent*
-  namespace where ``robo`` lives, like a notebook or OpenAI's python tool.
-  Variables and functions defined in one cell are available in the next.
-* ``program`` - one tool ``run_program(code | path)``: the code is a complete
-  file defining ``run(robo)``; every program starts from a fresh namespace
-  (files in the workspace persist and can be imported).  ``max_programs=1``
-  is the single-shot protocol.
-
-Both arms also get ``finish(status, summary)``.  Every tool result is text
-(stdout, errors, the ledger of primitive calls, the robot state) plus the two
-current camera images whenever the robot moved, so the agent's per-turn
-perception matches what a tool-calling agent receives after each primitive.
+:class:`ArmToolkit` is a tiny toolkit (``get_tools_spec`` / ``execute_tool``) with two tools:
+``python(code)``, which runs the code in a *persistent* namespace where ``robo`` lives (like a
+notebook: variables and functions defined in one cell are available in the next), and
+``finish(status, summary)``.  Every tool result is text (stdout, errors, optionally the ledger
+of primitive calls and the robot state) plus camera images as the image policy says.
+:func:`arm_contract` renders the instructions the agent reads about them.
 """
 
 from __future__ import annotations
@@ -42,10 +33,8 @@ from typing import Any
 
 from ._backend import EpisodeFinished
 from ._robot import RobotBase
-from .runner import PolicyLoadError, load_policy, run_policy
 from .sandbox import audit_source, blocked_names, make_builtins
 
-ARMS = ("cells", "program")
 #: When camera images are attached to a tool result: after a turn that moved,
 #: after each state-changing primitive, only when ``robo.show()`` is called,
 #: or never.
@@ -61,7 +50,7 @@ MAX_TEXT_CHARS = 20_000
 
 @dataclass
 class ArmResult:
-    """What the MCP server hands back: ``result`` (dict) and content blocks."""
+    """What a tool hands back: ``result`` (dict) and images, also as content blocks."""
 
     result: dict[str, Any]
     images: list[bytes] = field(default_factory=list)
@@ -124,7 +113,7 @@ def _state_dict(robo: RobotBase) -> dict[str, Any]:
 
 
 def _blocked_message(names: list[str], what: str) -> str:
-    """Why a cell or program was not run (it named :data:`BLOCKED_NAMES` members)."""
+    """Why a cell was not run (it named :data:`BLOCKED_NAMES` members)."""
 
     return (
         f"SandboxError: {', '.join(names)} may not be used by policy code; the {what} was not "
@@ -133,22 +122,17 @@ def _blocked_message(names: list[str], what: str) -> str:
 
 
 class ArmToolkit:
-    """MCP-servable tool surface around one robot (a :class:`RobotBase`)."""
+    """The agent's tools around one robot (a :class:`RobotBase`)."""
 
     def __init__(
         self,
         robo: RobotBase,
         *,
-        arm: str,
         workspace: Path,
-        max_programs: int | None = None,
-        program_timeout_s: float | None = None,
         images: bool | str = True,
         feedback: str = "rich",
         max_turns: int | None = None,
     ) -> None:
-        if arm not in ARMS:
-            raise ValueError(f"arm must be one of {ARMS}, got {arm!r}")
         if images is True:
             images = "on-motion"
         elif images is False:
@@ -159,12 +143,9 @@ class ArmToolkit:
             raise ValueError(f"feedback must be one of {FEEDBACK_MODES}, got {feedback!r}")
         self.feedback = feedback
         self.robo = robo
-        self.arm = arm
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
-        self.max_programs = max_programs
-        self.program_timeout_s = program_timeout_s
-        #: Decision budget: at most this many `python` / `run_program` calls.
+        #: Decision budget: at most this many `python` calls.
         self.max_turns = max_turns
         self.turn_budget_exhausted = False
         self.images = images
@@ -173,7 +154,7 @@ class ArmToolkit:
         self.turns: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._displayed: list[Any] = []
-        #: Audit flags of every cell / program that raised any (host-side only).
+        #: Audit flags of every cell that raised any (host-side only).
         self.sandbox_flags: list[dict[str, Any]] = []
         self._last_flags: list[str] = []
         self._builtins = make_builtins(self.workspace)
@@ -194,7 +175,6 @@ class ArmToolkit:
         except ImportError:  # pragma: no cover - numpy is expected at runtime
             pass
         self._cell_index = 0
-        self._program_index = 0
 
     def _display(self, image: Any) -> None:
         """Attach an image (numpy array, PIL image or PNG bytes) to this turn's result."""
@@ -219,62 +199,30 @@ class ArmToolkit:
                 "required": ["status", "summary"],
             },
         }
-        if self.arm == "cells":
-            main = {
-                "name": "python",
-                "description": (
-                    "Execute Python code in a persistent session where `robo` "
-                    "(the robot), `np`, `math` and `time` are defined. "
-                    "Variables, functions and imports persist between calls. "
-                    "Returns stdout, stderr, the exception if any, the value of a "
-                    "trailing expression, the robot state, and camera images "
-                    "according to the configured policy. Set `image_return` to "
-                    "`all`, `final` or `none` to override it."
-                ),
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "code": {"type": "string", "description": "Python source"},
-                        "image_return": {
-                            "type": "string",
-                            "enum": list(IMAGE_RETURN_MODES),
-                            "description": "override this call's configured image policy",
-                        },
-                    },
-                    "required": ["code"],
-                },
-            }
-        else:
-            budget = (
-                f" You may call it at most {self.max_programs} time(s)."
-                if self.max_programs
-                else ""
-            )
-            main = {
-                "name": "run_program",
-                "description": (
-                    "Run a complete Python program that defines `run(robo)`: pass "
-                    "the full source as `code`, or `path` of a .py file you wrote "
-                    "in the workspace. Each program starts from a fresh namespace "
-                    "(workspace files persist and can be imported). Returns "
-                    "stdout, stderr, the exception if any, the ledger of primitive "
-                    "calls, the robot state and camera images according to the "
-                    "configured policy. Set `image_return` to `all`, `final` or "
-                    "`none` to override it." + budget
-                ),
-                "input_schema": {
-                    "type": "object",
-                    "properties": {
-                        "code": {"type": "string", "description": "full program source"},
-                        "path": {"type": "string", "description": "workspace-relative .py file"},
-                        "image_return": {
-                            "type": "string",
-                            "enum": list(IMAGE_RETURN_MODES),
-                            "description": "override this call's configured image policy",
-                        },
+        main = {
+            "name": "python",
+            "description": (
+                "Execute Python code in a persistent session where `robo` "
+                "(the robot), `np`, `math` and `time` are defined. "
+                "Variables, functions and imports persist between calls. "
+                "Returns stdout, stderr, the exception if any, the value of a "
+                "trailing expression, the robot state, and camera images "
+                "according to the configured policy. Set `image_return` to "
+                "`all`, `final` or `none` to override it."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Python source"},
+                    "image_return": {
+                        "type": "string",
+                        "enum": list(IMAGE_RETURN_MODES),
+                        "description": "override this call's configured image policy",
                     },
                 },
-            }
+                "required": ["code"],
+            },
+        }
         return [main, finish]
 
     def execute_tool(self, name: str, input_dict: dict[str, Any]) -> ArmResult:
@@ -286,7 +234,7 @@ class ArmToolkit:
             # Primitive telemetry is emitted while the Python cell is still
             # executing.  The ledger hook uses this context to associate each
             # primitive with its cell before the final calls.jsonl is written.
-            next_cell = self._cell_index + 1 if name == "python" and self.arm == "cells" else None
+            next_cell = self._cell_index + 1 if name == "python" else None
             self.robo._ledger.set_context(cell=next_cell, tool=name)
             started = time.perf_counter()
             calls_before = len(self.robo._ledger)
@@ -294,10 +242,8 @@ class ArmToolkit:
             try:
                 if name == "finish":
                     result = self._finish(input_dict)
-                elif name == "python" and self.arm == "cells":
+                elif name == "python":
                     result = self._python(str(input_dict.get("code", "")))
-                elif name == "run_program" and self.arm == "program":
-                    result = self._run_program(input_dict)
                 else:
                     result = ArmResult({"error": f"unknown tool: {name}"})
             except Exception as exc:  # noqa: BLE001 - never crash the server
@@ -335,17 +281,7 @@ class ArmToolkit:
             "status": str(args.get("status", "")),
             "summary": str(args.get("summary", "")),
         }
-        if self._live_success():
-            self.finish["environment_terminated"] = self.robo._reported_success()
         return ArmResult({"ok": True, **self.finish})
-
-    def _live_success(self) -> bool:
-        """Whether the robot reports task success during the episode (it has ``done``).
-
-        Without it the feedback carries no success field at all: a constant
-        False would read as "not solved yet".
-        """
-        return "done" not in getattr(self.robo, "ABSENT_MEMBERS", ())
 
     def _snapshot(self) -> tuple[int, int | None]:
         return len(self.robo._ledger), self.robo._backend.env_steps()
@@ -376,8 +312,6 @@ class ArmToolkit:
             else None
         )
         result["state"] = _state_dict(self.robo)
-        if self._live_success():
-            result["episode_done"] = self.robo._reported_success()
         return self._attach_images(result, moved, result, records)
 
     def _attach_images(
@@ -511,68 +445,6 @@ class ArmToolkit:
         extra["elapsed_s"] = round(time.perf_counter() - started, 2)
         return self._feedback(before, extra)
 
-    def _run_program(self, args: dict[str, Any]) -> ArmResult:
-        if not self._budget_left(self._program_index):
-            return ArmResult({"error": "call budget exhausted: the episode is over, call finish"})
-        if self.max_programs is not None and self._program_index >= self.max_programs:
-            return ArmResult(
-                {
-                    "error": f"program budget exhausted ({self.max_programs}); call finish",
-                    "state": _state_dict(self.robo),
-                }
-            )
-        code = args.get("code")
-        path = args.get("path")
-        if not code and not path:
-            return ArmResult({"error": "run_program needs `code` or `path`"})
-        self._program_index += 1
-        index = self._program_index
-        if code:
-            target = self.workspace / f"program_{index:02d}.py"
-            target.write_text(str(code), encoding="utf-8")
-        else:
-            target = (self.workspace / str(path)).resolve()
-            if (
-                self.workspace.resolve() not in target.parents
-                and target != self.workspace.resolve()
-            ):
-                return ArmResult({"error": "path must be inside the workspace"})
-            if not target.is_file():
-                return ArmResult({"error": f"no such file in workspace: {path}"})
-        try:
-            source = target.read_text(encoding="utf-8")
-        except OSError:
-            source = ""
-        self._last_flags = audit_source(source, workspace=self.workspace)
-        before = self._snapshot()
-        extra: dict[str, Any] = {"program": index, "file": target.name}
-        blocked = blocked_names(source)
-        if blocked:  # before load_policy: importing the file runs its module code
-            extra["exception"] = _blocked_message(blocked, "program")
-            return self._feedback(before, extra)
-        stdout, stderr = io.StringIO(), io.StringIO()
-        try:
-            policy = load_policy(target, builtins=self._builtins)
-        except PolicyLoadError as exc:
-            extra["exception"] = str(exc)
-            return self._feedback(before, extra)
-        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
-            outcome = run_policy(policy, self.robo, timeout_s=self.program_timeout_s)
-        extra["status"] = outcome.status
-        if outcome.reason:
-            extra["reason"] = outcome.reason
-        if outcome.error_type:
-            extra["exception"] = _trim(
-                outcome.traceback or f"{outcome.error_type}: {outcome.error_message}", 4000
-            )
-        extra["stdout"] = _trim(stdout.getvalue())
-        extra["stderr"] = _trim(stderr.getvalue())
-        extra["elapsed_s"] = round(outcome.elapsed_s, 2)
-        extra["programs_left"] = (
-            None if self.max_programs is None else self.max_programs - self._program_index
-        )
-        return self._feedback(before, extra)
-
 
 INTERACTION_PROTOCOL = """\
 ## Module 1: Planning and Summary Pattern
@@ -592,14 +464,13 @@ a pick-and-place plan should include:
 4. Move while holding the object to a position near the destination and
    confirm arrival.
 5. Place the object and confirm placement.
-6. Fully open both grippers, return both arms home, and confirm both arms
-   are home with both grippers fully open.
+6. Bring the robot to the final state the task description requires (for
+   example, grippers open and both arms back at their initial poses, or the
+   object still held) and confirm it.
 
 The complete plan must state the final goal, known scene facts, and unresolved
 questions. For every milestone, specify its target state and observable
-completion evidence. When applicable, make establishing an observer pose for
-the idle hand the first robot-action milestone, and include returning both
-arms home with confirmation before submitting the task. If a prerequisite is
+completion evidence. If a prerequisite is
 missing (for example, a demonstration still needs to be observed), plan and
 complete that prerequisite first; write the complete task plan before the
 first task action.
@@ -661,12 +532,15 @@ becomes unsafe or obstructs the task, replan and confirm a new safe observer
 pose before continuing. Choose the pose for the current scene; do not assume a
 fixed coordinate works in every scene.
 
-After the task result is confirmed, make fully opening both grippers and
-returning both arms home the final execution milestone. Call
-`set_gripper(arm, robo.OPEN)` for each arm, then return both arms home. Inspect
-robot state and confirm both arms are home and both grippers are fully open
-before submitting the task. Do not submit while the task result or any part of
-this final state is unconfirmed.
+After the task result is confirmed, read the task description for the final
+state it requires and make reaching that state the final execution milestone.
+If the description asks for open grippers and both arms back at their initial
+poses, call `set_gripper(arm, robo.OPEN)` for each arm and then return both
+arms home; if it asks for an object to stay held, inserted or in place, keep
+it so and do not open, withdraw or home. Do only what the description asks.
+Inspect the images and robot state and confirm the required final state before
+submitting the task. Do not submit while the task result or any part of the
+required final state is unconfirmed.
 
 ## Module 3: Motion Rules
 
@@ -812,92 +686,6 @@ files there.  Do not read files outside it and do not use the shell to reach
 the simulator; every action goes through `python`.
 """
 
-PROGRAM_CONTRACT = """\
-# How you control the robot
-
-You control {robot_blurb} through ONE tool,
-`run_program`.  Each call runs a complete Python program that defines
-`run(robo)`: pass the whole source as `code`, or write a `.py` file into your
-working directory and pass its `path`.  `robo` is a `{cls}` bound to the
-live simulator{svc}.  Every
-program starts from a fresh namespace (files in the workspace persist and can
-be imported); no language model runs while a program executes, so every
-decision inside it must be made in code from the return values documented
-below.  The tool returns the program's stdout, stderr, the exception if any,
-{feedback_note}  {image_note}
-{program_budget}
-
-# How the episode is scored
-
-{scoring_head}
-{ending_note}
-  A program that raises stops there; the episode continues with the robot
-  where it stopped.
-{scoring_tail}
-
-# Interaction protocol
-{interaction_protocol}
-
-## Additional Robot-specific Guidance
-
-Use an observe-plan-act-review loop. Before the first tool call, write a short
-plain-text task plan; do not call a tool in that first reply. State the final
-goal, scene facts and uncertainties that affect action choices, and ordered
-milestones. For each milestone, state its target state and observable evidence
-that will count as completion. Mark the boundary of the next tool call. Keep
-actions that require inspecting a result before deciding what to do next in
-separate calls; do not put dependent follow-up actions in the same script.
-
-After every tool result and before the next call, briefly report what was done,
-whether it matched expectations, what the images, state, or tool feedback
-confirm, and what remains uncertain. Update relevant milestones as not started,
-in progress, confirmed, or blocked. Mark a milestone confirmed only when its
-stated evidence is present; a successful command or completed script is not
-evidence by itself. Name the next milestone and the boundary of the next call.
-If evidence is insufficient or something unexpected happened, observe,
-relocalize, adjust, or recover before taking any action that depends on the
-uncertain result. Report the status and evidence for every milestone on every
-turn. Update only affected plan details when new evidence changes them; do not
-repeat the full plan details every turn. Report useful observations,
-evidence, status, and decisions only, not hidden reasoning. Then use the tool
-for one bounded action phase. Treat visual locations as estimates, not
-exact coordinates. For a grasp, move near the estimated target first and stop
-before closing the gripper; inspect the returned view and robot state, then
-relocalize or make a small correction if needed. Close the gripper only in a
-later tool call, after the approach looks aligned. Make the closing call by
-itself, then inspect its gripper feedback, robot state, and images to confirm
-the object is actually held before lifting or transporting it. Use an explicit
-`holding` signal or measured gripper opening when available, together with
-visual evidence. A successful command or a closed gripper alone does not prove
-a grasp. If the evidence is unclear, stay in place and inspect, relocalize, or
-adjust; do not begin transport. For placement, move near the
-destination while keeping the gripper closed, stop and inspect, then correct
-the pose if needed. Release only in a later tool call once alignment is
-credible, and inspect the result to verify the object was placed successfully.
-Never assume a grasp, transport, or placement succeeded just because its
-script ran.
-
-Perform every object handoff in separate tool calls, with an inspection between
-stages. The holding hand must keep its gripper closed until the receiving hand
-is confirmed to have a secure grasp. Keep the holding hand still while the
-receiving hand moves into position and stops for inspection. After the
-receiving hand closes, inspect images and available state to confirm it holds
-the object. Only then may the holding hand release. If the grasp is uncertain,
-keep both grippers closed and inspect or adjust; do not release. After release,
-confirm the receiving hand still holds the object before moving either hand
-away from the handoff area. A successful gripper command alone does not confirm
-a grasp.
-
-Programs run in a sandbox: they may import `math`, `time`, `numpy`, `json`,
-`re`, `PIL` and other pure-computation modules, but not `os`, `sys`,
-`subprocess`, `pathlib` or networking, and `open` only works inside the
-workspace; code that reaches for Python internals (`__globals__`,
-`__subclasses__`, ...) is refused; keep them self-contained.
-Do not read files outside the workspace and do not use the shell to reach the
-simulator; every action goes through `run_program`.
-"""
-
-
 IMAGE_NOTES = {
     "on-motion": (
         "Whenever the robot moved during the call, the current camera images "
@@ -943,94 +731,37 @@ IMAGE_CONTEXT_NOTE = (
     "attach several images per call, so keep context limits in mind."
 )
 
+#: What a tool result holds besides images, per feedback mode.
 FEEDBACK_NOTES = {
-    "cells": {
-        "pure": (
-            "The tool returns exactly what your code produced: stdout, stderr, "
-            "the exception if any, and the value of a trailing expression.  "
-            "Nothing else is added: print what you want to know (for example "
-            "`print(robo.state())` or the result of a motion call)."
-        ),
-        "rich": (
-            "The tool returns stdout, stderr, the exception if any, the value of "
-            "a trailing expression, the ledger of primitive calls made during "
-            "the call and the robot state."
-        ),
-    },
-    "program": {
-        "pure": (
-            "The tool returns exactly what the program produced: stdout, stderr "
-            "and the exception if any.  Nothing else is added: print what you "
-            "want to know."
-        ),
-        "rich": (
-            "The tool returns the program's stdout, stderr, the exception if any, "
-            "the ledger of primitive calls it made and the robot state."
-        ),
-    },
+    "pure": (
+        "The tool returns exactly what your code produced: stdout, stderr, "
+        "the exception if any, and the value of a trailing expression.  "
+        "Nothing else is added: print what you want to know (for example "
+        "`print(robo.state())` or the result of a motion call)."
+    ),
+    "rich": (
+        "The tool returns stdout, stderr, the exception if any, the value of "
+        "a trailing expression, the ledger of primitive calls made during "
+        "the call and the robot state."
+    ),
 }
 
 
-#: The scoring bullets around ``{ending_note}``, per arm.  ``live``: the
-#: benchmark reports success while the episode runs.  ``final``: it judges the
-#: scene the episode leaves behind and reports nothing meanwhile (a robot
-#: without ``done``, i.e. RoboDojo, whose success RPent keeps from its own
-#: planner too).
-SCORING_NOTES = {
-    "live": {
-        "cells": (
-            "- Success = the benchmark's own task predicate fires (`terminated`) at any\n"
-            "  moment.  The simulator checks it, not you; motion results carry a\n"
-            "  `terminated` field and `robo.done` reports it.",
-            "- Once the task terminates, motion calls raise `EpisodeFinished`: call\n"
-            '  `finish(status="success", ...)` and stop.  If you cannot make progress, call\n'
-            "  `finish` with `failure` or `stuck`.",
-        ),
-        "program": (
-            "- Success = the benchmark's own task predicate fires (`terminated`) at any\n"
-            "  moment while a program runs.  The simulator checks it, not you.",
-            "- Once the task terminates, motion calls raise `EpisodeFinished`: call\n"
-            '  `finish(status="success", ...)` and stop.  If you cannot make progress, call\n'
-            "  `finish` with `failure` or `stuck`.",
-        ),
-    },
-    "final": {
-        "cells": (
-            "- Success is judged by the benchmark from the final scene, after the episode\n"
-            "  has ended.  Nothing reports it while you work: no result carries a\n"
-            "  task-success flag, so judge progress from the images and the robot state.",
-            "- When the scene shows that the instruction is satisfied, call\n"
-            '  `finish(status="success", ...)` and stop.  If you cannot make progress, call\n'
-            "  `finish` with `failure` or `stuck`.",
-        ),
-        "program": (
-            "- Success is judged by the benchmark from the final scene, after the episode\n"
-            "  has ended.  Nothing reports it while a program runs: no result carries a\n"
-            "  task-success flag.",
-            "- When the scene shows that the instruction is satisfied, call\n"
-            '  `finish(status="success", ...)` and stop.  If you cannot make progress, call\n'
-            "  `finish` with `failure` or `stuck`.",
-        ),
-    },
-}
+#: The scoring bullets around ``{ending_note}``.  RoboDojo judges the scene the episode
+#: leaves behind and reports nothing meanwhile.
+SCORING_NOTES = (
+    "- Success is judged by the benchmark from the final scene, after the episode\n"
+    "  has ended.  Nothing reports it while you work: no result carries a\n"
+    "  task-success flag, so judge progress from the images and the robot state.",
+    "- When the scene shows that the instruction is satisfied, call\n"
+    '  `finish(status="success", ...)` and stop.  If you cannot make progress, call\n'
+    "  `finish` with `failure` or `stuck`.",
+)
 
 
+#: How the episode ends, per budget mode: a limit ends the episode, and what the
+#: scene shows then is what counts.
 ENDING_NOTES = {
-    "wall": (
-        "- The episode ends after {budget_s} s of wall clock in total (your thinking\n"
-        "  included) or {max_env_steps} simulator steps; that counts as a failure."
-    ),
-    "calls": (
-        "- The number of `{tool}` calls in an episode is limited (every call counts,\n"
-        "  including calls that only look, print or display); the episode also ends\n"
-        "  after {max_env_steps} simulator steps.  Reaching either limit counts as a\n"
-        "  failure, so make every call do purposeful work and verify results in code."
-    ),
-}
-BUDGET_MODES = tuple(ENDING_NOTES)
-#: The same notes for a robot whose benchmark judges the final scene: a limit
-#: ends the episode, and what the scene shows then is what counts.
-ENDING_NOTES_FINAL = {
     "wall": (
         "- The episode ends after {budget_s} s of wall clock in total (your thinking\n"
         "  included) or {max_env_steps} simulator steps; the scene is judged as it is\n"
@@ -1043,19 +774,7 @@ ENDING_NOTES_FINAL = {
         "  as it is, so make every call do purposeful work and verify results in code."
     ),
 }
-
-
-GUIDES_NOTE = (
-    "Reference guides: the directory `guides/` in your working directory holds "
-    "the three operating guides that the tool-calling version of this system "
-    "reads at run time, written for its tool interface: "
-    "`strict_hybrid_guide.md` (rules, localisation, command vocabulary, common "
-    "failure modes), `pro_hybrid_guide.md` (LIBERO-PRO scene frames and "
-    "swap-variant gotchas) and `env_calibration.md` (reachable workspace and "
-    "reference heights).  The tool names used there are the `robo` methods of "
-    "the same name; remarks about the runner, MCP or servers do not apply "
-    "here.  Reading them is optional."
-)
+BUDGET_MODES = tuple(ENDING_NOTES)
 
 
 #: Wording used when a caller does not pass a robot adapter's own words.
@@ -1068,57 +787,42 @@ DEFAULT_ROBOT = {
         "`robo.show('cam_head')`, `robo.show('cam_left_wrist')` or "
         "`robo.show('cam_right_wrist')`"
     ),
-    "scoring": "final",
 }
 
 
 def arm_contract(
-    arm: str,
     *,
     budget_s: int,
     max_env_steps: int,
-    max_programs: int | None,
     images: str = "on-motion",
     feedback: str = "rich",
-    guides: bool = False,
     budget_mode: str = "wall",
     robot: dict[str, str] | None = None,
 ) -> str:
-    """Render the arm's contract; ``guides=True`` appends :data:`GUIDES_NOTE`.
+    """Render the contract: how the agent controls the robot and how the episode is scored.
 
     ``budget_mode="wall"`` states the wall-clock budget; ``"calls"`` states
     that the number of tool calls is limited (without the number, which the
-    tool-calling arm's own prompt does not state either).  ``robot`` names
-    the robot for the contract (keys of :data:`DEFAULT_ROBOT`; default RoboDojo);
-    its ``scoring`` key picks the scoring bullets (:data:`SCORING_NOTES`).
+    agent is not told).  ``robot`` names
+    the robot for the contract (keys of :data:`DEFAULT_ROBOT`; default RoboDojo).
     """
 
     if budget_mode not in BUDGET_MODES:
         raise ValueError(f"budget_mode must be one of {BUDGET_MODES}, got {budget_mode!r}")
-    text = _arm_contract(
-        arm,
+    return _arm_contract(
         budget_s=budget_s,
         max_env_steps=max_env_steps,
-        max_programs=max_programs,
         images=images,
         feedback=feedback,
         budget_mode=budget_mode,
         robot=robot,
     )
-    if guides:
-        text = text.rstrip() + "\n\n" + GUIDES_NOTE + "\n"
-    return text
 
 
-def robot_words(adapter: Any, primitives: str = "full") -> dict[str, str]:
-    """Contract wording for a :class:`robodojo.robots.RobotAdapter`.
+def robot_words(adapter: Any) -> dict[str, str]:
+    """Contract wording for a :class:`robodojo.robots.RobotAdapter`."""
 
-    ``primitives="no-vla"`` names the adapter's ``services_novla`` (the
-    services left once the VLA is removed) instead of ``services``.
-    """
-
-    key = "services" if primitives == "full" else "services_novla"
-    phrase = getattr(adapter, key, "") or ""
+    phrase = getattr(adapter, "services", "") or ""
     head, _, tail = phrase.partition(" ")
     return {
         "robot_blurb": adapter.blurb,
@@ -1127,16 +831,13 @@ def robot_words(adapter: Any, primitives: str = "full") -> dict[str, str]:
         # the cells contract breaks the line after the first word of the phrase
         "svc_nl": f", {head}\n{tail}" if tail else (f", {phrase}" if phrase else ""),
         "show_examples": adapter.show_examples,
-        "scoring": "live" if getattr(adapter, "live_success", True) else "final",
     }
 
 
 def _arm_contract(
-    arm: str,
     *,
     budget_s: int,
     max_env_steps: int,
-    max_programs: int | None,
     images: str = "on-motion",
     feedback: str = "rich",
     budget_mode: str = "wall",
@@ -1148,40 +849,16 @@ def _arm_contract(
         + " "
         + IMAGE_CONTEXT_NOTE
     )
-    feedback_note = FEEDBACK_NOTES[arm][feedback]
-    ending_notes = ENDING_NOTES if words["scoring"] == "live" else ENDING_NOTES_FINAL
-    ending_note = ending_notes[budget_mode].format(
+    feedback_note = FEEDBACK_NOTES[feedback]
+    ending_note = ENDING_NOTES[budget_mode].format(
         budget_s=budget_s,
         max_env_steps=max_env_steps,
-        tool="python" if arm == "cells" else "run_program",
+        tool="python",
     )
-    scoring_head, scoring_tail = SCORING_NOTES[words["scoring"]][arm]
-    if arm == "cells":
-        return CELLS_CONTRACT.format(
-            budget_s=budget_s,
-            max_env_steps=max_env_steps,
-            image_note=image_note,
-            feedback_note=feedback_note,
-            ending_note=ending_note,
-            scoring_head=scoring_head,
-            scoring_tail=scoring_tail,
-            interaction_protocol=INTERACTION_PROTOCOL,
-            **words,
-        )
-    if max_programs == 1:
-        budget = (
-            "You may call it EXACTLY ONCE: there is no second attempt and no "
-            "feedback before it runs, so the program must localise, verify and "
-            "recover on its own."
-        )
-    elif max_programs:
-        budget = f"You may call it at most {max_programs} times; use the feedback between calls."
-    else:
-        budget = "You may call it as many times as the budget allows."
-    return PROGRAM_CONTRACT.format(
+    scoring_head, scoring_tail = SCORING_NOTES
+    return CELLS_CONTRACT.format(
         budget_s=budget_s,
         max_env_steps=max_env_steps,
-        program_budget=budget,
         image_note=image_note,
         feedback_note=feedback_note,
         ending_note=ending_note,
@@ -1193,11 +870,9 @@ def _arm_contract(
 
 
 __all__ = [
-    "ARMS",
     "DEFAULT_ROBOT",
     "BUDGET_MODES",
     "FEEDBACK_MODES",
-    "GUIDES_NOTE",
     "IMAGE_POLICIES",
     "IMAGE_RETURN_MODES",
     "ArmResult",

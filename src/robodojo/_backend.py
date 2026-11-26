@@ -8,9 +8,9 @@
 
 """Backend contract, error types and the per-episode call ledger.
 
-A backend is whatever executes a primitive for real: RPent's ``Toolkit`` is
-the reference implementation (``execute_tool`` / ``solved``).  The robot
-classes in this package only ever talk to a backend through this small
+A backend is whatever executes a primitive for real
+(:class:`robodojo.hosts.robodojo_native.NativeBackend`: ``execute_tool`` / ``solved``).  The
+robot classes in this package only ever talk to a backend through this small
 contract, so the same policy code runs against a fake backend in tests and
 against a live simulator in an evaluation.
 """
@@ -80,7 +80,7 @@ class EpisodeFinished(BaseException):  # noqa: N818 - deliberate BaseException
 def unwrap(result: Any, tool: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Split a backend result into ``(primitive_payload, state_envelope)``.
 
-    RPent replaces the result of every state-changing tool with an observation
+    The result of every state-changing tool comes in an observation
     envelope (``step``, ``state``, ``terminated``, ``log.result`` ...).  The
     primitive's own return value lives at ``log.result``.  Read-only tools
     return their payload directly, in which case the envelope is ``None``.

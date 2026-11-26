@@ -6,18 +6,16 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 
-"""robodojo: code-as-policy for RoboDojo.
+"""robodojo: code-as-policy for RoboDojo's Agent Track.
 
-Derived from PyRUA-Lean. A language model writes Python against ``robo``;
-this package turns those calls into joint targets for RoboDojo's own
-evaluation client.
+A language model writes Python against ``robo`` while the episode runs; this package turns
+those calls into joint targets for RoboDojo's own evaluation client, through XPolicyLab.
 """
 
 from ._backend import Backend, CallRecord, EpisodeFinished, Ledger, ToolError
 from ._robot import RobotBase
-from .prompt import PromptBundle, TaskCard, api_reference, knowledge_text, render_prompt
+from .prompt import TaskCard, api_reference, knowledge_text
 from .robots import ROBOTS, RobotAdapter, get_adapter
-from .runner import PolicyLoadError, PolicyOutcome, load_policy, run_policy
 
 __version__ = "0.1.0"
 
@@ -26,9 +24,6 @@ __all__ = [
     "CallRecord",
     "EpisodeFinished",
     "Ledger",
-    "PolicyLoadError",
-    "PolicyOutcome",
-    "PromptBundle",
     "ROBOTS",
     "RobotAdapter",
     "RobotBase",
@@ -37,8 +32,5 @@ __all__ = [
     "api_reference",
     "get_adapter",
     "knowledge_text",
-    "load_policy",
-    "render_prompt",
-    "run_policy",
     "__version__",
 ]

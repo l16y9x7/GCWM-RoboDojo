@@ -96,8 +96,6 @@ def test_on_primitive_attaches_each_stateful_record_frame():
 
 def test_code_tools_expose_per_call_image_return_modes():
     toolkit = object.__new__(ArmToolkit)
-    toolkit.arm = "cells"
-    toolkit.max_programs = None
 
     spec = toolkit.get_tools_spec()[0]
 

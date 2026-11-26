@@ -8,13 +8,10 @@
 
 """SAM3 in this process, behind the interface the RoboDojo tools segment through.
 
-RPent runs SAM3 as a server of its own and hands its tools a client.  A host without RPent's
-runtime (:mod:`.xpolicylab_robodojo`) loads the same model here: the official ``sam3``
-package and its interactive point head, with the calls and settings RPent's server makes
-(every candidate kept, bfloat16 autocast, the best-scoring instance returned), so one picture
-and one prompt give one mask whichever of the two runs it.  ``segment`` takes exactly one of
-a text prompt and a ``[row, col]`` pixel and answers like
-``rpent.robots.components.sam3_client.Sam3Client``.
+The host (:mod:`.xpolicylab_robodojo`) loads the model here: the ``sam3`` package and its
+interactive point head (every candidate kept, bfloat16 autocast, the best-scoring instance
+returned), so one picture and one prompt give one mask.  ``segment`` takes exactly one of a
+text prompt and a ``[row, col]`` pixel and answers with a :class:`Segmented`.
 """
 
 from __future__ import annotations
@@ -32,7 +29,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Segmented:
-    """One mask, or none: what RPent's client returns."""
+    """One mask, or none."""
 
     found: bool
     score: float | None = None
