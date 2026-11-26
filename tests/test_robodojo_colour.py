@@ -6,8 +6,8 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 
-"""RoboDojo as its own evaluation shows it: the colour-only tools, the toolkit that needs no
-RPent, and the bridge to XPolicyLab's evaluation client."""
+"""RoboDojo as its own evaluation shows it: the colour-only tools, the toolkit over a bare
+environment, and the bridge to XPolicyLab's evaluation client."""
 
 from __future__ import annotations
 
@@ -31,7 +31,6 @@ from robodojo.hosts import robodojo_tools as tools
 from robodojo.hosts import xpolicylab_bridge as xb
 from robodojo.hosts.sam3_local import Segmented
 from robodojo.prompt import api_reference, knowledge_text
-from robodojo.robodojo_xpl import RobodojoOfficialRobot
 from robodojo.robodojo_xpl_rgb import ObjectSight, RobodojoOfficialColourRobot, SeenPoint
 from robodojo.robots import get_adapter
 
@@ -161,17 +160,6 @@ def test_locate_measures_from_colour_images_when_there_is_no_depth(world):
     assert bowl["length_m"] == pytest.approx(0.116, abs=0.008)
 
 
-def test_colour_only_is_what_the_host_says_or_what_the_observation_lacks():
-    class Plain:
-        pass
-
-    assert tools.colour_only(Plain(), {"color": 1})
-    assert not tools.colour_only(Plain(), {"color": 1, "distance_to_image_plane": 1})
-    told = Plain()
-    told.colour_only = True
-    assert tools.colour_only(told, {"color": 1, "distance_to_image_plane": 1})
-
-
 def test_a_height_two_cameras_agreed_on_is_kept_for_when_one_sees_the_object(world):
     scene, _sam3, prim = world
     first = tools.locate(prim, "the bowl")
@@ -237,7 +225,7 @@ def test_the_toolkit_records_steps_and_wraps_what_changes_the_scene(world, tmp_p
 def test_the_colour_robot_reads_the_same_api_without_depth(world, tmp_path):
     scene, sam3, _prim = world
     backend = native.NativeBackend(native.NativeToolkit(scene, sam3, tmp_path))
-    robo = RobodojoOfficialColourRobot(backend, primitives="no-vla")
+    robo = RobodojoOfficialColourRobot(backend)
     assert robo.task == "put the cube in the bowl"
     seen = robo.locate("the cube")
     assert isinstance(seen, ObjectSight) and seen.views == 2 and seen.note is None
@@ -260,14 +248,14 @@ def test_the_colour_robot_reads_the_same_api_without_depth(world, tmp_path):
 
 def test_the_reference_and_the_knowledge_of_the_colour_robot_promise_no_depth():
     adapter = get_adapter("robodojo_xpl_rgb")
-    reference = api_reference(adapter.robot_cls, primitives="no-vla")
+    reference = api_reference(adapter.robot_cls)
     assert "there is no depth image" in reference and "views" in reference
     assert "sim_frames(step: int = -1, *, sim_step: int | None = None)" in reference
     assert "through the depth image" not in reference
-    knowledge = knowledge_text(adapter.knowledge, primitives="no-vla")
+    knowledge = knowledge_text(adapter.knowledge)
     assert "no depth image" in knowledge and "pi0_pick" not in knowledge
     assert "`views >= 2`" in knowledge
-    assert adapter.host.endswith("xpolicylab_robodojo_rgb")
+    assert adapter.host == "robodojo.hosts.xpolicylab_robodojo"
 
 
 # -- the bridge to XPolicyLab's evaluation client ---------------------------------------------
@@ -275,7 +263,7 @@ def test_the_reference_and_the_knowledge_of_the_colour_robot_promise_no_depth():
 
 def _deploy():
     path = Path(__file__).resolve().parents[1] / "integrations/xpolicylab/robodojo/deploy.py"
-    spec = importlib.util.spec_from_file_location("pyrua_lean_deploy", path)
+    spec = importlib.util.spec_from_file_location("robodojo_adapter_deploy", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -313,10 +301,30 @@ class TaskEnv:
         return self.end_flag[0]
 
 
+class PolicyModel:
+    """XPolicyLab's ``Model`` at its thinnest: every call goes to a :class:`xb.Bridge`."""
+
+    def __init__(self, bridge: xb.Bridge) -> None:
+        self.bridge = bridge
+
+    def reset(self) -> None:
+        self.bridge.reset()
+
+    def update_obs(self, obs: dict[str, Any]) -> None:
+        self.bridge.update_obs(obs)
+
+    def get_action(self) -> list[dict[str, Any]]:
+        return self.bridge.get_action()
+
+    def on_trial_end(self, result: dict[str, Any] | None = None) -> bool:
+        self.bridge.episode_end(result)
+        return True
+
+
 class Client:
     """XPolicyLab's model client, calling the policy model in the same process."""
 
-    def __init__(self, model: xb.PolicyModel) -> None:
+    def __init__(self, model: Any) -> None:
         self.model = model
         self.calls: list[str] = []
 
@@ -329,7 +337,7 @@ class Client:
 
 def _episode(task_env: TaskEnv, poll_s: float = 0.05):
     bridge = xb.Bridge(poll_s=poll_s)
-    client = Client(xb.PolicyModel(bridge))
+    client = Client(PolicyModel(bridge))
     thread = threading.Thread(
         target=_deploy().eval_one_episode, args=(task_env, client), daemon=True
     )
@@ -343,14 +351,7 @@ def test_the_tools_step_roboDojos_client_through_the_bridge(tmp_path):
     task_env = TaskEnv(scene, step_lim=200)
     bridge, client, thread = _episode(task_env)
     env = xb.BridgeEnv(bridge)
-    assert env.get_status() == {
-        "pictures_behind": 1,
-        "step": 0,
-        "step_limit": 200,
-        "task_name": "stack_blocks",
-        "eval_seed": 0,
-        "layout": 3,
-    }
+    assert env.get_status() == {"step": 0, "step_limit": 200}
     toolkit = native.NativeToolkit(
         env, Segmenter(scene), tmp_path, verdict=lambda: bool((bridge.over or {}).get("success"))
     )
@@ -381,9 +382,7 @@ def test_the_tools_step_roboDojos_client_through_the_bridge(tmp_path):
     robot.move_to([0.24, 0.0, 0.94], arm="right", pitch=45)
     record = robot._ledger.records[-1]
     assert record.summary["step"] == 2
-    agent_tools = ArmToolkit(
-        robot, arm="cells", workspace=tmp_path / "policy", images="on-sim-step"
-    )
+    agent_tools = ArmToolkit(robot, workspace=tmp_path / "policy", images="on-sim-step")
     result = agent_tools._attach_images({}, True, {}, [record])
     assert result.images and result.result["images"][0].startswith("step_0002_sim_001_")
     assert backend.solved() is False and thread.is_alive()
@@ -421,7 +420,7 @@ def test_the_client_ends_the_episode_itself_when_the_task_is_solved(tmp_path):
 
 def test_get_action_does_not_keep_the_client_waiting_while_the_program_thinks():
     bridge = xb.Bridge(poll_s=0.02)
-    model = xb.PolicyModel(bridge)
+    model = PolicyModel(bridge)
     model.update_obs({"state": {}, "vision": {}})
     assert model.get_action() == xb.WAIT
     bridge.finish()
@@ -471,7 +470,7 @@ def _adapter_model(monkeypatch):
     monkeypatch.setitem(sys.modules, "XPolicyLab.utils", utils)
     monkeypatch.setitem(sys.modules, "XPolicyLab.utils.process_data", process_data)
     path = Path(__file__).resolve().parents[1] / "integrations/xpolicylab/robodojo/model.py"
-    spec = importlib.util.spec_from_file_location("pyrua_lean_model", path)
+    spec = importlib.util.spec_from_file_location("robodojo_adapter_model", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -495,7 +494,7 @@ def test_the_adapters_model_runs_an_episode_for_each_reset(monkeypatch, tmp_path
             {
                 "cell": cell,
                 "robot": kwargs["robot"],
-                "primitives": kwargs["primitives"],
+                "primitives": kwargs.get("primitives"),
                 "steps": moved["log"]["result"]["steps_used"],
                 "daemons": daemons,
                 "success": backend.solved(),
@@ -512,18 +511,22 @@ def test_the_adapters_model_runs_an_episode_for_each_reset(monkeypatch, tmp_path
             "env_cfg_type": "arx_x5",
             "result_dir": tmp_path,
             "robot": "robodojo_xpl_rgb",  # the scene below sends no depth
+            "task_name": "stack_blocks",  # what XPolicyLab starts the policy server with
+            "seed": 0,
         }
     )
     client = Client(model)
     deploy = _deploy()
     for solved_at in (None, 3):  # two episodes in a row, as RoboDojo's client runs them
         task_env = TaskEnv(Scene([CUBE]), step_lim=200, solved_at=solved_at)
+        task_env.task_name = "the evaluator's task"  # never read by the policy side
         deploy.eval_one_episode(task_env, client)  # returns: nothing is left waiting
         model._episode.join(5.0)
         assert not model._episode.is_alive()
         last = played[-1]
-        assert last["cell"].task == "stack_blocks" and last["cell"].seed == 3
-        assert last["robot"] == "robodojo_xpl_rgb" and last["primitives"] == "no-vla"
+        # the task's name is the server's own; the layout is the evaluator's and stays there
+        assert last["cell"].task == "stack_blocks" and last["cell"].seed == -1
+        assert last["robot"] == "robodojo_xpl_rgb" and last["primitives"] is None
         assert last["daemons"] == []  # XPolicyLab started the pair, the host started nothing
         assert last["success"] is (solved_at is not None)
         assert task_env.take_action_cnt[0] == (last["steps"] if solved_at is None else solved_at)
@@ -675,7 +678,7 @@ def test_the_clients_trial_stands_when_the_verdict_cannot_be_delivered():
     task_env = TaskEnv(Scene([CUBE]), step_lim=200)
     thread = threading.Thread(
         target=_deploy().eval_one_episode,
-        args=(task_env, Deaf(xb.PolicyModel(bridge))),
+        args=(task_env, Deaf(PolicyModel(bridge))),
         daemon=True,
     )
     thread.start()
@@ -735,100 +738,6 @@ def test_a_reset_does_not_rewrite_a_verdict_the_client_gave():
 
 
 # -- what a deployed arm does to the pictures -------------------------------------------------
-
-
-class LateScene(Scene):
-    """RoboDojo's evaluation client: each observation's pictures show the robot one observation
-    earlier, and the host says so (``image_state``)."""
-
-    def __init__(self, shapes, tell: bool = True) -> None:
-        super().__init__(shapes)
-        self.tell = tell
-        self.pictured = self.state()
-        self._now = self.state()
-
-    def step(self, action):
-        out = super().step(action)
-        self.pictured, self._now = self._now, self.state()
-        return out
-
-    def view(self, camera: str) -> sight.View:
-        if camera == "cam_head":
-            return sight.head_view()
-        return sight.wrist_view(
-            self.pictured["left_ee_pose" if "left" in camera else "right_ee_pose"]
-        )
-
-    def get_obs(self):
-        obs = super().get_obs()
-        if self.tell:
-            obs["image_state"] = self.pictured
-        return obs
-
-
-def _swing(scene: Scene) -> None:
-    """One action that turns the right arm, so that its camera has just moved."""
-
-    goal = [0.2, 0.0, 0.0, 0.0, 0.0, 0.0]
-    hold = {f"{arm}_ee_joint_state": [1.0] for arm in kin.ARMS}
-    scene.step({"left_arm_joint_state": [0.0] * 6, "right_arm_joint_state": goal, **hold})
-
-
-def test_pictures_one_observation_late_are_read_with_the_state_they_show():
-    told = LateScene([CUBE])
-    _swing(told)
-    assert told.pictured != told.state()  # the arm moved in the last action
-    out = tools.locate(native._Primitives(told, Segmenter(told)), "the cube")
-    assert out["views"] == 2 and _off(out["center_xyz"], CUBE) < 0.003
-    assert out["height_m"] == pytest.approx(0.035, abs=0.004)
-    # the same pictures read against the state of the moment: the wrist camera is taken to be
-    # where it no longer was, and the two cameras cannot agree on the cube
-    untold = LateScene([CUBE], tell=False)
-    _swing(untold)
-    wrong = tools.locate(native._Primitives(untold, Segmenter(untold)), "the cube")
-    worse = wrong["views"] == 1 or abs(wrong["height_m"] - 0.035) > 0.006
-    assert worse or _off(wrong["center_xyz"], CUBE) > 0.004
-
-
-def test_the_bridge_says_which_state_the_pictures_show():
-    def obs(state, behind):
-        info = {xb.STATUS_KEY: {"step": 0, "pictures_behind": behind}}
-        return {"state": state, "vision": {}, "additional_info": info}
-
-    first, second = {"right_ee_pose": [1.0]}, {"right_ee_pose": [2.0]}
-    # an older RoboDojo client: the pictures are of the observation before
-    bridge = xb.Bridge()
-    bridge.update_obs(obs(first, 1))
-    assert bridge.get_obs()["image_state"] is first  # nothing has moved yet
-    bridge.update_obs(obs(second, 1))
-    assert bridge.get_obs()["image_state"] is first and bridge.get_obs()["state"] is second
-    assert tools._shown(bridge.get_obs()) is first
-    # a client that renders the current state before it captures (RoboDojo 6e3190f and later)
-    bridge = xb.Bridge()
-    bridge.update_obs(obs(first, 0))
-    bridge.update_obs(obs(second, 0))
-    assert bridge.get_obs()["image_state"] is second
-    assert tools._shown({"state": second}) is second  # a host that says nothing
-
-
-def test_deploy_tells_an_older_client_from_one_that_renders_before_it_captures(monkeypatch):
-    import sys
-    import types
-
-    deploy = _deploy()
-    for name in [n for n in sys.modules if n == "env" or n.startswith("env.")]:
-        monkeypatch.delitem(sys.modules, name)
-    assert deploy._pictures_behind() == 1  # no RoboDojo render_sync module: the older client
-    packages = {}
-    for name in ("env", "env.camera_manager", "env.camera_manager.capture"):
-        packages[name] = types.ModuleType(name)
-        packages[name].__path__ = []  # a package
-        monkeypatch.setitem(sys.modules, name, packages[name])
-    sync = types.ModuleType("env.camera_manager.capture.render_sync")
-    monkeypatch.setitem(sys.modules, sync.__name__, sync)
-    packages["env.camera_manager.capture"].render_sync = sync
-    assert deploy._pictures_behind() == 0
-    assert deploy._status(TaskEnv(Scene([CUBE]), step_lim=10))["pictures_behind"] == 0
 
 
 class Told(Segmenter):
@@ -987,7 +896,7 @@ def test_a_height_is_not_kept_from_a_rough_reading_nor_used_where_a_taller_thing
     assert clean["views"] == 2 and "the cube" in tools._heights(prim)
 
 
-# -- the same robot with the depth image the client can be configured to send ------------------
+# -- a client configured to send a depth image: the robot still reads only the colour images --
 
 
 def _depth(view: sight.View, shapes: list[dict[str, Any]]) -> np.ndarray:
@@ -1038,212 +947,37 @@ class DepthScene(Scene):
 
 
 @pytest.mark.parametrize("key", ["depth", "approximate_depth"])
-def test_with_depth_in_the_observation_the_tools_read_it(key, tmp_path):
+def test_a_depth_image_in_the_observation_is_not_read(key, tmp_path):
     scene = DepthScene([CUBE], key)
-    sam3 = Segmenter(scene)
-    toolkit = native.NativeToolkit(scene, sam3, tmp_path)  # the observation decides
-    backend = native.NativeBackend(toolkit)
-    assert backend.colour_only is False
-    out = backend.execute_tool("locate", {"text_prompt": "the cube"})
-    assert out["found"] and "views" not in out and "geometry_error" not in out
+    toolkit = native.NativeToolkit(scene, Segmenter(scene), tmp_path)
+    out = toolkit.execute_tool("locate", {"text_prompt": "the cube"})
+    assert out["found"] and out["views"] == 2  # measured from the colour images
     assert _off(out["center_xyz"], CUBE) < 0.003
-    assert out["height_m"] == pytest.approx(0.035, abs=0.003)
-    assert {camera for camera, _ in sam3.calls} == {"cam_head"}  # no other camera is asked
-    # a pixel is the point the depth image has there
-    rows, cols = np.nonzero(render(sight.head_view(), scene.shapes) == 0)
-    top = backend.execute_tool(
-        "back_project", {"row": int(rows.min()) + 3, "col": int(np.median(cols))}
-    )
-    assert top["world_xyz"][2] == pytest.approx(kin.TABLE_Z + 0.035, abs=0.003)
-    assert "surface" not in top and top["depth_m"] > 0.3
-    assert "error" in backend.execute_tool("back_project", {"row": 900, "col": 0})
-    # ... and the robot of robodojo.robodojo runs on it as it is
-    robo = RobodojoOfficialRobot(backend, primitives="no-vla")
-    pose = robo.locate("the cube")
-    assert type(pose).__name__ == "ObjectPose" and _off(pose.center_xyz, CUBE) < 0.003
-    meta = robo.camera_meta("cam_right_wrist")
-    assert meta["has_depth"] is True and len(meta["extrinsic_matrix"]) == 4
-    assert robo.back_project(int(rows.min()) + 3, int(np.median(cols))).xyz[2] > kin.TABLE_Z + 0.03
-    # told to read no depth, the same toolkit measures from the colour images
-    plain = native.NativeToolkit(scene, Segmenter(scene), tmp_path / "rgb", colour_only=True)
-    assert plain.execute_tool("locate", {"text_prompt": "the cube"})["views"] == 2
 
 
-def test_the_xpolicylab_robot_is_the_robodojo_robot_and_asks_for_depth(tmp_path):
+def test_the_host_boots_on_the_bridge_xpolicylab_serves(tmp_path):
     from robodojo.hosts import xpolicylab_robodojo as xhost
     from robodojo.hosts.robodojo_cell import Cell
-    from robodojo.robodojo import ADAPTER as base
 
-    adapter = get_adapter("robodojo_xpl")
-    assert adapter.knowledge == base.knowledge and adapter.host.endswith("xpolicylab_robodojo")
-    assert api_reference(adapter.robot_cls, primitives="no-vla") == api_reference(
-        base.robot_cls, primitives="no-vla"
-    ).replace(base.robot_cls.__name__, adapter.robot_cls.__name__)
-    cell = Cell(suite="arx_x5", task="stack_blocks", seed=0)
-    # a client that sends depth: the tools read it
+    assert get_adapter("robodojo_xpl_rgb").host_module() is xhost
+    cell = Cell(suite="arx_x5", task="stack_blocks", seed=-1)
     bridge = xb.Bridge()
-    bridge.update_obs(DepthScene([CUBE]).get_obs())
-    toolkit, daemons = xhost.boot(cell, tmp_path / "a", env_only=True, bridge=bridge)
-    assert daemons == [] and toolkit._primitives.colour_only is False
-    # a client left at its default: refused, with the way out
-    bare = xb.Bridge()
-    bare.update_obs(Scene([CUBE]).get_obs())
-    with pytest.raises(RuntimeError, match="robodojo_xpl_rgb"):
-        xhost.boot(cell, tmp_path / "b", env_only=True, bridge=bare)
-    rgb = get_adapter("robodojo_xpl_rgb").host_module()
-    toolkit, _ = rgb.boot(cell, tmp_path / "c", env_only=True, bridge=bare)
-    assert toolkit._primitives.colour_only is True
-
-
-def _checkout(tmp_path):
-    """A RoboDojo checkout as far as the layout reads it: the tree, XPolicyLab inside, Assets."""
-
-    import yaml
-
-    from robodojo.hosts import xpolicylab_robodojo as xhost
-
-    source = tmp_path / "RoboDojo"
-    for part in xhost.client_root().SOURCE_PARTS:
-        (source / part).mkdir(parents=True)
-    (source / "env" / "global_configs.py").write_text("ROOT = __file__\n")
-    (source / "env_cfg" / "camera").mkdir()
-    top = {
-        "config_name": "arx_x5",
-        "config": {"camera": "camera_config"},
-        "observation": {"vision": {"depth": False, "intrinsic_matrix": False, "shape": True}},
-    }
-    (source / "env_cfg" / "arx_x5.yml").write_text(yaml.safe_dump(top))
-    camera = {"annotator": {"cam_head": {"enabled": True, "rgb_capture": {"type": "rgb"}}}}
-    (source / "env_cfg" / "camera" / "camera_config.yml").write_text(yaml.safe_dump(camera))
-    xpl = source / "XPolicyLab"
-    for name in ("client_server/ws", "utils", "policy/ACT", ".git"):
-        (xpl / name).mkdir(parents=True)
-    (xpl / "client_server" / "ws" / "model_server.py").write_text("")
-    (xpl / "utils" / "process_data.py").write_text("")
-    (xpl / "policy" / "__init__.py").write_text("")
-    (xpl / "policy" / "ACT" / "model.py").write_text("")
-    layouts = source / "Assets" / "Eval_Layout" / "RoboDojo" / "arx_x5" / "0"
-    layouts.mkdir(parents=True)
-    for layout in range(4):
-        (layouts / f"stack_blocks_{layout}.json").write_text("{}")
-    (layouts / "stack_blocks_random_0.json").write_text("{}")
-    return source, top
-
-
-def test_the_host_switches_depth_on_in_its_own_copy_of_the_config(tmp_path):
-    import yaml
-
-    from robodojo.hosts import xpolicylab_robodojo as xhost
-
-    source, top = _checkout(tmp_path)
-    xpl = xhost._xpolicylab_root(None, source)  # the checkout's own
-    assert xpl == source / "XPolicyLab"
-    bench = xhost.lay_out(tmp_path / "bench", source, xpl, depth=True)
-    # copies: RoboDojo finds env_cfg and Assets by ".." from its own files
-    for part in xhost.client_root().SOURCE_PARTS:
-        assert (bench / part).is_dir() and not (bench / part).is_symlink()
-    assert (bench / "env" / "global_configs.py").is_file()
-    assert (bench / "Assets").is_symlink() and (bench / "Assets" / "Eval_Layout").is_dir()
-    vision = yaml.safe_load((bench / "env_cfg" / "arx_x5.yml").read_text())["observation"]["vision"]
-    assert vision == {
-        "depth": True,
-        "intrinsic_matrix": True,
-        "extrinsic_matrix": True,
-        "shape": True,
-    }
-    captures = yaml.safe_load((bench / "env_cfg" / "camera" / "camera_config.yml").read_text())
-    for name in ("common", "cam_head", "cam_left_wrist", "cam_right_wrist"):
-        got = captures["annotator"][name]["distance_to_image_plane_capture"]
-        assert got["type"] == "distance_to_image_plane"
-    assert captures["annotator"]["cam_head"]["rgb_capture"] == {"type": "rgb"}
-    # XPolicyLab's own code and this policy, no other policy, nothing of its repository
-    assert (bench / "XPolicyLab" / "utils" / "process_data.py").is_file()
-    assert sorted(p.name for p in (bench / "XPolicyLab" / "policy").iterdir()) == [
-        "__init__.py",
-        "robodojo",
-    ]
-    assert (bench / "XPolicyLab" / "policy" / "robodojo" / "deploy.py").is_file()
-    assert not (bench / "XPolicyLab" / ".git").exists()
-    # RoboDojo's own tree is as it was; without depth the copy keeps its switches
-    assert yaml.safe_load((source / "env_cfg" / "arx_x5.yml").read_text()) == top
-    plain = xhost.lay_out(tmp_path / "plain", source, xpl)
-    assert yaml.safe_load((plain / "env_cfg" / "arx_x5.yml").read_text()) == top
-
-
-def test_the_host_picks_one_layout_the_way_xpolicylab_does(tmp_path):
-    from robodojo.hosts import xpolicylab_robodojo as xhost
-    from robodojo.hosts.robodojo_cell import Cell
-
-    source, _ = _checkout(tmp_path)
-    bench = xhost.lay_out(tmp_path / "bench", source, source / "XPolicyLab", depth=True)
-    cell = Cell(suite="arx_x5", task="stack_blocks", seed=2)
-    info = "ckpt_name=robodojo,action_type=joint"
-    manifest = xhost.only_layout(bench, cell, eval_seed=0, additional_info=info, run_id="run-7")
-    # where RoboDojo's client looks for it, relative to the directory it runs from
-    assert manifest == (
-        bench / "eval_result/RoboDojo/stack_blocks/robodojo/arx_x5" / f"0_{info}"
-        / "_resume_run-7.json"
-    )  # fmt: skip
-    data = json.loads(manifest.read_text())
-    # stack_blocks_random_0.json is another task's layout: four layouts, three left out
-    assert data["abandoned_layout_ids"] == [0, 1, 3] and data["completed_layout_ids"] == []
-    assert data["success_nums"] == data["fail_nums"] == 0 and data["details"] == {}
-    assert data["save_dir"] == str(manifest.parent / "run-7")
-    with pytest.raises(ValueError, match="holds 4"):
-        xhost.only_layout(
-            bench,
-            Cell(suite="arx_x5", task="stack_blocks", seed=4),
-            eval_seed=0,
-            additional_info=info,
-            run_id="run-8",
-        )
-
-
-def test_a_root_with_depth_can_write_its_results_into_the_checkout(tmp_path):
-    import yaml
-
-    from robodojo.hosts import xpolicylab_robodojo as xhost
-
-    source, top = _checkout(tmp_path)
-    module = xhost.client_root()
-    root = module.lay_out(tmp_path / "root", source, results=source / "eval_result")
-    assert (root / "eval_result").is_symlink()
-    assert (root / "eval_result").resolve() == (source / "eval_result").resolve()
-    vision = yaml.safe_load((root / "env_cfg" / "arx_x5.yml").read_text())["observation"]["vision"]
-    assert vision["depth"] is True and vision["extrinsic_matrix"] is True
-    # no policy named: none is copied; RoboDojo's own tree is as it was
-    assert sorted(p.name for p in (root / "XPolicyLab" / "policy").iterdir()) == ["__init__.py"]
-    assert yaml.safe_load((source / "env_cfg" / "arx_x5.yml").read_text()) == top
+    bridge.update_obs(Scene([CUBE]).get_obs())
+    toolkit, daemons = xhost.boot(cell, tmp_path, env_only=True, bridge=bridge)
+    assert daemons == []  # XPolicyLab started the client and the server; the host starts nothing
+    card = xhost.dump_card(toolkit, cell, tmp_path)
+    assert card.robot == "robodojo_xpl_rgb" and (tmp_path / "card.json").is_file()
 
 
 def test_the_adapter_starts_the_client_as_robodojo_configures_it():
     """The submitted directory holds nothing that changes what the client sends."""
 
     adapter = Path(__file__).resolve().parents[1] / "integrations/xpolicylab/robodojo"
-    assert not (adapter / "client_root.py").exists()
     client = (adapter / "setup_eval_env_client.sh").read_text()
-    assert "env_cfg" not in client.replace("env_cfg_type", "") and "client_root" not in client
+    assert "env_cfg" not in client.replace("env_cfg_type", "")
     import yaml
 
     assert "observation" not in yaml.safe_load((adapter / "deploy.yml").read_text())
-
-
-def test_a_late_picture_gets_the_camera_pose_it_was_taken_from():
-    def obs(pose, behind):
-        info = {xb.STATUS_KEY: {"pictures_behind": behind}}
-        cam = {"color": 0, "extrinsic_matrix": pose}
-        return {"state": {"q": pose}, "vision": {"cam_right_wrist": cam}, "additional_info": info}
-
-    old = xb.Bridge()
-    old.update_obs(obs("first", 1))
-    old.update_obs(obs("second", 1))
-    got = old.get_obs()
-    assert got["vision"]["cam_right_wrist"]["extrinsic_matrix"] == "first"
-    assert got["image_state"] == {"q": "first"} and got["state"] == {"q": "second"}
-    new = xb.Bridge()
-    new.update_obs(obs("first", 0))
-    new.update_obs(obs("second", 0))
-    assert new.get_obs()["vision"]["cam_right_wrist"]["extrinsic_matrix"] == "second"
 
 
 def test_the_adapter_holds_still_in_xpolicylabs_debug_loop(monkeypatch):
@@ -1279,3 +1013,79 @@ def test_the_adapter_holds_still_in_xpolicylabs_debug_loop(monkeypatch):
     )
     assert env.seen[0]["left_arm_joint_state"] == pytest.approx([0.1] * 6)
     assert deploy._status(env)["step"] == 4 and deploy._status(env)["step_limit"] == 4
+
+
+# -- RoboDojo Agent Track rule: no task identity or seed reaches the policy ------------------
+
+
+def test_the_task_card_names_neither_the_task_nor_the_seed():
+    from robodojo.prompt import TaskCard
+
+    card = TaskCard(
+        suite="arx_x5",
+        task="secret_task_name",
+        seed=7319,
+        task_language="put the cube in the bowl",
+        object_names=[],
+        images={"cam_head": "/runs/x/card/cam_head.png"},
+        max_env_steps=700,
+        robot="robodojo_xpl_rgb",
+        facts={"native action budget": "700"},
+    )
+    text = card.render()
+    assert "secret_task_name" not in text and "7319" not in text
+    assert "- task:" not in text and "- seed:" not in text and "seed " not in text
+    assert "put the cube in the bowl" in text  # the instruction itself stays
+
+
+def test_deploy_sends_the_policy_no_task_name_seed_or_layout():
+    task_env = TaskEnv(Scene([CUBE]), step_lim=10)
+    assert set(_deploy()._status(task_env)) == {"step", "step_limit"}
+
+
+# -- RoboDojo Agent Track rule: the instruction is the official Detail Description -----------
+
+DETAIL = (
+    "Put the red cube into the blue bowl.\n"
+    "Success: the cube rests inside the bowl and both arms are back at their start pose."
+)
+
+
+def test_the_instruction_is_the_official_detail_description_verbatim():
+    obs = {
+        "instruction": "put the cube in the bowl",
+        "extra_info": {"detailed_instruction": DETAIL},
+    }
+    assert native.instruction_of(obs) == DETAIL
+    # a description sent as lines is joined, not reworded
+    lines = {"extra_info": {"detailed_instruction": DETAIL.split("\n")}}
+    assert native.instruction_of(lines) == DETAIL
+
+
+@pytest.mark.parametrize(
+    "obs",
+    [
+        {"instruction": "put the cube in the bowl"},
+        {"instruction": "put the cube in the bowl", "extra_info": {"detailed_instruction": "  "}},
+        {"instruction": "put the cube in the bowl", "extra_info": None},
+        {"instructions": "put the cube in the bowl", "extra_info": {"other": 1}},
+    ],
+)
+def test_without_a_detail_description_the_instruction_falls_back(obs):
+    assert native.instruction_of(obs) == "put the cube in the bowl"
+
+
+def test_the_card_carries_the_detail_description_unchanged():
+    from robodojo.prompt import TaskCard
+
+    card = TaskCard(
+        suite="arx_x5",
+        task="t",
+        seed=0,
+        task_language=DETAIL,
+        object_names=[],
+        robot="robodojo_xpl_rgb",
+    )
+    text = card.render()
+    assert f"<<<\n{DETAIL}\n>>>" in text  # line breaks kept, nothing escaped or quoted
+    assert "\\n" not in text  # no repr-escaped line breaks

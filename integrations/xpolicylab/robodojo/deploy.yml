@@ -11,15 +11,13 @@ action_type: joint
 gpu_id: null
 eval_batch: false
 
-# The robot the programs are written against, as `robodojo play --robot` names it:
-# RoboDojo's default observation, three colour images and the robot's state.  A depth image
-# or camera matrices, should a client send them, are not read.
+# The robot the programs are written against: RoboDojo's default observation, three colour
+# images and the robot's state.  A depth image or camera matrices, should a client send them,
+# are not read.
 robot: robodojo_xpl_rgb
-primitives: no-vla
 
 # The agent that writes the programs: an OpenAI-compatible chat endpoint (OPENAI_BASE_URL,
 # OPENAI_API_KEY) and a model name (here, or ROBODOJO_MODEL).
-runtime: openai
 model: null
 max_turns: 100
 budget_s: 5400

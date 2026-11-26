@@ -8,19 +8,15 @@
 
 """One RoboDojo evaluation cell: a task, an environment config and a layout id.
 
-Extracted from the RPent-backed host so the XPolicyLab host does not import it.
-``seed`` is the layout id. ``max_episode_steps`` is nominal: the simulator
-enforces the task's own ``step_lim``.
+``seed`` is the layout id; on the policy side, which is never told the layout, it is -1.
+``max_episode_steps`` is nominal: the simulator enforces the task's own ``step_lim``.
 """
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
 from typing import Any
 
-#: RoboDojo's ``--env-cfg-type`` values this package drives.
-ENV_CONFIGS = ("arx_x5",)
 #: Nominal step budget handed to a cell when the caller does not set one.
 DEFAULT_MAX_EPISODE_STEPS = 700
 
@@ -34,30 +30,6 @@ class Cell:
     seed: int
     max_episode_steps: int = DEFAULT_MAX_EPISODE_STEPS
     cuda_device: int | None = None
-
-    @property
-    def tag(self) -> str:
-        return f"{self.task}_l{self.seed}"
-
-
-def add_cell_args(parser: argparse.ArgumentParser) -> None:
-    """RoboDojo cell identifiers (``robodojo play --robot robodojo_xpl_rgb``)."""
-
-    parser.add_argument("--task", required=True, help="RoboDojo task name, e.g. stack_blocks")
-    parser.add_argument(
-        "--suite", default="arx_x5", choices=ENV_CONFIGS, help="RoboDojo environment config"
-    )
-    parser.add_argument("--seed", type=int, default=0, help="layout id")
-
-
-def cell_from_args(args: argparse.Namespace) -> Cell:
-    return Cell(
-        suite=str(getattr(args, "suite", None) or "arx_x5"),
-        task=str(args.task),
-        seed=int(args.seed),
-        max_episode_steps=int(getattr(args, "max_episode_steps", DEFAULT_MAX_EPISODE_STEPS)),
-        cuda_device=getattr(args, "cuda_device", None),
-    )
 
 
 def _fmt(values: Any) -> str:

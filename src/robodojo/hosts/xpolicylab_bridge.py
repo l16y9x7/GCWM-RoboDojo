@@ -9,11 +9,11 @@
 """Between XPolicyLab's two calls and an environment a program steps.
 
 XPolicyLab's evaluation client owns the simulator and asks a policy for actions: it sends an
-observation (``update_obs``) and asks what to do (``get_action``).  A PyRUA-Lean episode is the
-other way round: a program calls a tool, the tool steps the environment and reads what came
-of it.  :class:`Bridge` turns one into the other.  The policy server answers ``get_action``
-with the next native action a tool has asked for; the tool's ``step`` returns when the client
-has taken it and sent the observation that followed.
+observation (``update_obs``) and asks what to do (``get_action``).  An episode of this
+package is the other way round: a program calls a tool, the tool steps the environment and
+reads what came of it.  :class:`Bridge` turns one into the other.  The policy server answers
+``get_action`` with the next native action a tool has asked for; the tool's ``step`` returns
+when the client has taken it and sent the observation that followed.
 
 A model thinks for minutes between two actions, far longer than the client waits for one
 answer, so ``get_action`` never holds the client longer than ``poll_s``: when no tool has
@@ -23,19 +23,12 @@ to each observation (``additional_info["robodojo"]``) and reports the benchmark'
 when the episode is over (the protocol's ``trial_end``, which the server hands to
 ``on_trial_end``).
 
-An older RoboDojo client's pictures run one observation behind its state (fixed upstream
-in 6e3190f).  ``deploy.py`` says which client it is, and the bridge adds to each observation
-the state its pictures show (``image_state``: the previous observation's for such a client),
-which is what the tools take a wrist camera's pose from; where the client sends the cameras'
-matrices, a late picture gets the matrix of the observation before as well.
-
-:class:`PolicyModel` is the object XPolicyLab's policy server serves (its ``Model``);
-:func:`serve` runs that server in this process.
+The adapter's ``model.py`` is the ``Model`` XPolicyLab's policy server serves; it hands each
+call to a :class:`Bridge`.
 """
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import threading
 import time
@@ -63,7 +56,6 @@ class Bridge:
         self._finished = False
         self._over: dict[str, Any] | None = None
         self._status: dict[str, Any] = {}
-        self._pictured: Any = None
         self._frame_subscribers: set[Any] = set()
         self.resets = 0
 
@@ -81,31 +73,6 @@ class Bridge:
             info = (obs.get("additional_info") or {}).get(STATUS_KEY)
             if isinstance(info, dict):
                 self._status = dict(info)
-            # An older RoboDojo client hands out the frame rendered before the current
-            # physics state: its pictures are of the robot as the previous observation's
-            # state has it (a wrist camera's picture fits that end-effector pose to a
-            # millimetre, and the current one only while the arm stands still).  deploy.py
-            # says which client this is; a current one's pictures show the state they come with.
-            state = obs.get("state")
-            poses = {
-                name: cam.get(key)
-                for name, cam in (obs.get("vision") or {}).items()
-                for key in ("extrinsic_matrix", "extrinsics_matrix")
-                if isinstance(cam, dict) and cam.get(key) is not None
-            }
-            behind = int(self._status.get("pictures_behind") or 0)
-            if behind >= 1 and self._pictured is not None:
-                # ... and so are the camera poses it sends along (RoboDojo issue 38): a wrist
-                # camera's depth image belongs with the pose of the observation before
-                obs["image_state"], then = self._pictured
-                for name, cam in (obs.get("vision") or {}).items():
-                    if name in then and isinstance(cam, dict):
-                        for key in ("extrinsic_matrix", "extrinsics_matrix"):
-                            if cam.get(key) is not None:
-                                cam[key] = then[name]
-            else:
-                obs["image_state"] = state
-            self._pictured = (state, poses)
             self._obs = obs
             self._serial += 1
             callbacks = tuple(self._frame_subscribers)
@@ -281,78 +248,10 @@ class BridgeEnv:
         self.bridge.verdict(alive=self.alive)
 
 
-class PolicyModel:
-    """XPolicyLab's ``Model`` for a PyRUA-Lean episode: every call goes to a :class:`Bridge`."""
-
-    def __init__(self, bridge: Bridge) -> None:
-        self.bridge = bridge
-
-    def reset(self) -> None:
-        self.bridge.reset()
-
-    def update_obs(self, obs: dict[str, Any]) -> None:
-        self.bridge.update_obs(obs)
-
-    def get_action(self) -> list[dict[str, Any]]:
-        return self.bridge.get_action()
-
-    def on_trial_end(self, result: dict[str, Any] | None = None) -> bool:
-        self.bridge.episode_end(result)
-        return True
-
-    def update_obs_batch(self, obs_list: Any) -> None:
-        raise NotImplementedError("one conversation drives one environment: eval_batch is false")
-
-    def get_action_batch(self, env_idx_list: Any = None) -> Any:
-        raise NotImplementedError("one conversation drives one environment: eval_batch is false")
-
-
-class Server:
-    """XPolicyLab's websocket policy server, run in a thread of this process."""
-
-    def __init__(self, model: Any, host: str, port: int) -> None:
-        # XPolicyLab is importable once the host has put its checkout on sys.path
-        from client_server.ws.model_server import PolicyServer, PolicyServerConfig
-
-        self._loop = asyncio.new_event_loop()
-        self._server = PolicyServer(model, PolicyServerConfig(host=host, port=int(port)))
-        self._thread = threading.Thread(
-            target=self._run, name="xpolicylab-policy-server", daemon=True
-        )
-        self.error: BaseException | None = None
-        self._thread.start()
-
-    def _run(self) -> None:
-        asyncio.set_event_loop(self._loop)
-        try:
-            self._loop.run_until_complete(self._server.serve_forever())
-        except BaseException as exc:  # noqa: BLE001 - reported by the host
-            self.error = exc
-
-    def stop(self) -> None:
-        if not self._thread.is_alive():
-            return
-        try:
-            asyncio.run_coroutine_threadsafe(self._server.stop(), self._loop).result(timeout=10)
-        except Exception:  # noqa: BLE001 - best effort during shutdown
-            pass
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=10)
-
-
-def serve(bridge: Bridge, host: str, port: int) -> Server:
-    """Serve ``bridge`` to an XPolicyLab evaluation client on ``host:port``."""
-
-    return Server(PolicyModel(bridge), host, port)
-
-
 __all__ = [
     "Bridge",
     "BridgeEnv",
     "EpisodeOver",
-    "PolicyModel",
     "STATUS_KEY",
-    "Server",
     "WAIT",
-    "serve",
 ]
